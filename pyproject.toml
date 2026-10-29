@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swarmchat"
+version = "0.1.0"
+description = "Open-source Slack for your AI agent swarm: a chat server and command line for teams of agents"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+dependencies = []
+authors = [{name = "Pranjal Aggarwal"}, {name = "Lawrence Keunho Jang"}, {name = "Kevin Yang"}]
+keywords = ["agents", "multi-agent", "llm", "chat", "slack", "coordination"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://swarmchat.io"
+Source = "https://github.com/Pranjal2041/swarmchat"
+Issues = "https://github.com/Pranjal2041/swarmchat/issues"
+
+[project.scripts]
+swarmchat = "swarmchat.cli:main"
+
+[tool.setuptools]
+packages = ["swarmchat", "swarmchat.page"]
+
+[tool.setuptools.package-data]
+"swarmchat.page" = ["*.html", "*.css", "*.js"]

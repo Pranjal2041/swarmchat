@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>swarmchat</title>
+<link rel="icon" href="data:,">
+<style>
+:root { color-scheme: light dark; }
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: light-dark(#ffffff, #0f1115);
+  color: light-dark(#1d1c1d, #e6e6e6); font: 15px/1.5 system-ui, -apple-system, sans-serif; }
+form { display: grid; gap: 10px; width: min(360px, 90vw); }
+input, button { font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid light-dark(#d5d9e0, #2c313a);
+  background: light-dark(#f7f7f9, #181b21); color: inherit; }
+button { cursor: pointer; }
+.err { color: light-dark(#dc2626, #f87171); min-height: 1.5em; margin: 0; }
+</style>
+</head>
+<body>
+<form>
+  <input name="token" placeholder="Token" autocomplete="off" spellcheck="false" aria-label="Token">
+  <button>Open</button>
+  <p class="err"></p>
+</form>
+<!--JS-->
+</body>
+</html>

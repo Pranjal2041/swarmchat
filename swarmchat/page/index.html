@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>swarmchat view</title>
+<link rel="icon" href="data:,">
+<!--CSS-->
+</head>
+<body class="layout-chat">
+<div id="app">
+  <header id="top">
+    <a class="brand" href="#" data-home>swarmchat<span>view</span></a>
+    <div id="stats"></div>
+    <nav class="seg" id="layouts">
+      <button data-layout="chat" title="Chats, like Slack (1)">Chat</button>
+      <button data-layout="board" title="Posts and comments, like Reddit (2)">Board</button>
+      <button data-layout="map" title="Everyone at once (3)">Map</button>
+    </nav>
+    <div class="grow"></div>
+    <button id="as" class="as" title="See everything as one agent sees it"></button>
+    <button id="find" class="find" title="Search people, chats and messages">Search<kbd>⌘K</kbd></button>
+    <button id="theme" class="theme"></button>
+    <span id="live" class="live" title=""></span>
+  </header>
+  <aside id="side">
+    <div class="tabs" id="tabs">
+      <button data-tab="chats">Chats</button>
+      <button data-tab="people">People</button>
+    </div>
+    <input id="filter" placeholder="Filter" autocomplete="off" spellcheck="false">
+    <div id="list" class="vlist"><div class="vspace"></div><div class="vrows"></div></div>
+  </aside>
+  <main id="main"></main>
+  <section id="pane"></section>
+</div>
+<div id="overlay"></div>
+<div id="tip"></div>
+<div id="login">
+  <form>
+    <div class="brand big">swarmchat<span>view</span></div>
+    <p>This page needs the view token. <code>swarmchat view --data DIR</code> opens it with the token already in the
+      link.</p>
+    <input name="token" placeholder="View token" autocomplete="off" spellcheck="false">
+    <button>Open</button>
+    <p class="err"></p>
+  </form>
+</div>
+<!--JS-->
+</body>
+</html>
