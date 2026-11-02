@@ -11,13 +11,14 @@
 <body class="layout-chat">
 <div id="app">
   <header id="top">
-    <a class="brand" href="#" data-home>swarmchat<span>view</span></a>
+    <a class="brand" href="#" data-home><i class="logo"></i>swarmchat<span>view</span></a>
     <div id="stats"></div>
     <nav class="seg" id="layouts">
       <button data-layout="chat" title="Chats, like Slack (1)">Chat</button>
       <button data-layout="board" title="Posts and comments, like Reddit (2)">Board</button>
       <button data-layout="map" title="Everyone at once (3)">Map</button>
     </nav>
+    <button id="replay" class="replaybtn" title="Play the run again from its start (R)">▶ Replay</button>
     <div class="grow"></div>
     <button id="as" class="as" title="See everything as one agent sees it"></button>
     <button id="find" class="find" title="Search people, chats and messages">Search<kbd>⌘K</kbd></button>
@@ -34,12 +35,20 @@
   </aside>
   <main id="main"></main>
   <section id="pane"></section>
+  <footer id="bar">
+    <button class="play" data-play></button>
+    <div class="track"><canvas></canvas><div class="head" hidden></div><div class="hov"></div></div>
+    <div class="clock"></div>
+    <div class="seg small speeds"></div>
+    <button class="btn" data-quiet title="Jump over stretches with no messages">Skip gaps</button>
+    <button class="btn" data-live title="Leave the replay and follow the run as it happens (R)">Live</button>
+  </footer>
 </div>
 <div id="overlay"></div>
 <div id="tip"></div>
 <div id="login">
   <form>
-    <div class="brand big">swarmchat<span>view</span></div>
+    <div class="brand big"><i class="logo"></i>swarmchat<span>view</span></div>
     <p>This page needs the view token. <code>swarmchat view --data DIR</code> opens it with the token already in the
       link.</p>
     <input name="token" placeholder="View token" autocomplete="off" spellcheck="false">

@@ -119,3 +119,29 @@ pictures) and about 47 messages a second arriving, some with files:
 | a picture, from scrolling into view to drawn | about 35 ms |
 | the page's checks for new pictures, over 20 s of live traffic | 236 calls, 3.7 ms in all |
 | the chat's scroll position while pictures load | unchanged |
+
+Replay, 2026-10-27, on a Linux server with 128 cores (load average about 16 from other work), Python 3.12. The same
+kind of run: 1,000 agents, 3,527 chats, 1,000,000 messages over 5 h 41 min. Each request in the server process,
+gzipped JSON included, from `bench/view_bench.py`:
+
+| request                                          | ms   | gzipped KB |
+|--------------------------------------------------|-----:|-----------:|
+| every chat at a moment 1% into the run           | 27   | 71         |
+| every chat at the middle                         | 69   | 160        |
+| every chat at a moment 99% into the run          | 48   | 170        |
+| one agent's chats at the middle, with its unread | 7    | 6          |
+| the next 2,000 messages                          | 8    | 24         |
+| the next 20,000 messages                         | 59   | 226        |
+| newest 150 of a 226,000-message chat at a moment | 1.6  | 4.8        |
+
+In headless Chromium on the same server, with no GPU, so every frame is drawn in software, 1440 by 860, the map open
+and the replay at 60 times:
+
+| run | map | frames a second | run time played per 5 s |
+|---|---|---|---|
+| 8 agents, 24 chats, 325 messages | ring | 60 | 300 s |
+| 40 agents, 377 chats, 6,000 messages | ring | 60 | 300 s |
+| 1,000 agents, 3,527 chats, 1,000,000 messages, about 2,900 in flight | web | 53 | 300 s |
+
+A jump to any moment was on screen in 0.2 s on all three. In the largest, the page asked for the next 2,000 messages
+about one and a half times a second, 19 to 129 ms each in the browser.

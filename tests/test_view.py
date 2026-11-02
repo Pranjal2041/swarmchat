@@ -1,4 +1,5 @@
 """The viewer's requests (`swarmchat view`): they see every chat, follow everything live, and change nothing."""
+import collections
 import gzip
 import hashlib
 import http.client
@@ -19,6 +20,7 @@ from test_swarmchat import ROOT, Base, Server
 from swarmchat import config, view
 from swarmchat.client import Client, ClientError
 from swarmchat.server import make_server
+from swarmchat.store import epoch
 
 
 def folder_state(root):
@@ -335,6 +337,72 @@ class Activity(ViewBase):
         self.assertEqual(whole[chat], {"messages": 12, "sent": {"alice": 8, "bob": 4}})
         part = self.view.view_activity(buckets=4, **{"from": r["start"] + 0.002, "to": r["end"]})["window"]
         self.assertEqual(part[chat]["messages"], 11)
+
+
+class Replay(ViewBase):
+    def sent(self, who, chat, text):
+        m = who.send(chat=chat, text=text)["message"]
+        time.sleep(0.003)  # times are kept to the millisecond
+        return m
+
+    def test_every_chat_as_it_stood_at_a_moment(self):
+        one = self.sent(self.alice, "bob", "one")
+        self.sent(self.bob, "alice", "two")
+        self.alice.channel_create(name="news", members="bob")
+        time.sleep(0.003)
+        news = self.sent(self.alice, "#news", "news")
+        direct, channel = one["chat"], news["chat"]
+        then = self.view.view_at(at=epoch(one["at"]))["chats"]
+        self.assertEqual((then[direct]["messages"], then[direct]["sent"]), (1, {"alice": 1}))
+        self.assertEqual(then[direct]["last"], {"seq": one["seq"], "from": "alice", "at": one["at"]})
+        self.assertEqual((then[channel]["born"], then[channel]["messages"]), (False, 0))
+        self.assertNotIn("last", then[channel])
+        now = self.view.view_at(at=epoch(news["at"]))["chats"]
+        self.assertEqual((now[direct]["messages"], now[direct]["sent"], now[direct]["recent"]), (2, {"alice": 1, "bob": 1}, 2))
+        self.assertEqual((now[channel]["born"], now[channel]["messages"]), (True, 1))
+
+    def test_who_wrote_how_many_by_any_moment(self):
+        msgs = [self.sent(self.alice, "bob", str(i)) if i % 3 else self.sent(self.bob, "alice", str(i)) for i in range(10)]
+        for k, m in enumerate(msgs, 1):  # early moments count from the start, late ones back from the end
+            state = self.view.view_at(at=epoch(m["at"]))["chats"][m["chat"]]
+            self.assertEqual((state["messages"], state["sent"]), (k, dict(collections.Counter(x["from"] for x in msgs[:k]))))
+
+    def test_what_an_agent_had_read_then(self):
+        first = self.sent(self.alice, "bob", "hello @bob")
+        second = self.sent(self.alice, "bob", "are you there")
+        self.bob.read(chat="alice")
+        time.sleep(0.003)
+        third = self.sent(self.alice, "bob", "thanks")
+        other = self.sent(self.carol, "alice", "not for bob")
+        then = self.view.view_at(at=epoch(second["at"]), **{"as": "bob", "mine": True})["chats"]
+        self.assertEqual(list(then), [first["chat"]])  # only bob's chats
+        self.assertEqual(then[first["chat"]]["as"], {"upto": 0, "unread": 2, "mentioned": 1})
+        later = self.view.view_at(at=epoch(third["at"]), **{"as": "bob"})["chats"]
+        self.assertEqual(later[first["chat"]]["as"], {"upto": second["seq"], "unread": 1, "mentioned": 0})
+        self.assertNotIn("as", later[other["chat"]])
+
+    def test_what_was_written_after_a_moment_page_by_page(self):
+        pairs = [(self.alice, "bob"), (self.bob, "carol"), (self.carol, "alice,bob")]
+        msgs = [self.sent(*pairs[i % 3], str(i)) for i in range(7)]
+        want = [[epoch(m["at"]), m["chat"], m["seq"], m["from"]] for m in msgs]
+        got, after, pages = [], 0, 0
+        while True:
+            r = self.view.view_replay(after=after, limit=3)
+            got += r["messages"]
+            pages += 1
+            if not r["more"]:
+                break
+            after = r["messages"][-1][:3]
+        self.assertEqual((got, pages), (want, 3))
+        self.assertEqual(self.view.view_replay(after=epoch(msgs[1]["at"]))["messages"], want[2:])
+        self.assertEqual(self.view.view_replay(after=0, **{"as": "carol"})["messages"], [w for w in want if w[1] != msgs[0]["chat"]])
+
+    def test_a_chat_as_it_was_at_a_moment(self):
+        msgs = [self.sent(self.alice, "bob", f"m{i}") for i in range(12)]
+        r = self.view.view_messages(chat=msgs[0]["chat"], at=epoch(msgs[7]["at"]), limit=5)
+        self.assertEqual([m["text"] for m in r["messages"] if m["kind"] == "message"], ["m3", "m4", "m5", "m6", "m7"])
+        before = self.view.view_messages(chat=msgs[0]["chat"], at=epoch(msgs[0]["at"]) - 1)
+        self.assertEqual([m for m in before["messages"] if m["kind"] == "message"], [])
 
 
 def png(w, h) -> bytes:
