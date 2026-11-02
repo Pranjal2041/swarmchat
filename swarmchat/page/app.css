@@ -51,8 +51,10 @@ kbd { border: 1px solid var(--line2); border-bottom-width: 2px; border-radius: 4
 ::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-track { background: transparent; }
 
-#app { display: grid; height: 100vh; grid-template-rows: 48px minmax(0, 1fr) auto; grid-template-columns: 272px minmax(0, 1fr) auto;
-  grid-template-areas: "top top top" "side main pane" "bar bar bar"; }
+#app { display: grid; height: 100vh; height: 100dvh; grid-template-rows: 48px minmax(0, 1fr) auto auto; grid-template-columns: min(var(--side-w, 272px), 40vw) minmax(0, 1fr) auto;
+  grid-template-areas: "top top top" "side main pane" "bar bar bar" "nav nav nav"; }
+#find svg, #back svg, #tabbar svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+#back, #tabbar, .sheetx, .palette .cancel { display: none; }
 
 /* top bar */
 #top { grid-area: top; display: flex; align-items: center; gap: 14px; padding: 0 14px; border-bottom: 1px solid var(--line); background: var(--side); min-width: 0; }
@@ -75,6 +77,7 @@ body.replaying .replaybtn, body.layout-board .replaybtn, body.layout-map .replay
 .as, .find, .theme { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--muted); white-space: nowrap; }
 .as:hover, .find:hover, .theme:hover { border-color: var(--line2); color: var(--text); }
 .theme { width: 30px; padding: 0; justify-content: center; }
+.find svg { width: 15px; height: 15px; margin-left: -2px; }
 .theme svg { width: 16px; height: 16px; }
 .as.on { border-color: color-mix(in srgb, var(--accent) 60%, transparent); color: var(--text); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); }
 .as .x { color: var(--muted); padding: 0 2px; margin-right: -4px; }
@@ -89,7 +92,7 @@ body.replaying .replaybtn, body.layout-board .replaybtn, body.layout-map .replay
 @keyframes beat { 50% { box-shadow: 0 0 0 5px rgba(34,197,94,.05); } }
 
 /* sidebar */
-#side { grid-area: side; display: flex; flex-direction: column; background: var(--side); border-right: 1px solid var(--line); min-height: 0; }
+#side { grid-area: side; position: relative; display: flex; flex-direction: column; background: var(--side); border-right: 1px solid var(--line); min-height: 0; }
 .tabs { display: flex; gap: 4px; padding: 10px 10px 6px; }
 .tabs button { flex: 1; padding: 5px 0; border-radius: 6px; color: var(--muted); font-weight: 600; font-size: 13px; }
 .tabs button.on { background: var(--seg-on); color: var(--text); box-shadow: 0 0 0 1px var(--line); }
@@ -114,7 +117,7 @@ body.replaying .replaybtn, body.layout-board .replaybtn, body.layout-map .replay
 .ico.group { color: var(--group); }
 .ico.direct { color: var(--dm); }
 .badge { min-width: 18px; height: 18px; border-radius: 99px; padding: 0 6px; display: inline-grid; place-items: center; font-size: 11px; font-weight: 650; background: var(--accent); color: #fff; font-variant-numeric: tabular-nums; }
-.badge.at { background: var(--bad); }
+.badge.at { background: var(--bad); color: #fff; border-radius: 99px; padding: 0 6px; }  /* not the .at of a mention in text */
 .badge.mute { background: var(--panel2); color: var(--muted); }
 .pill { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--line2); color: var(--muted); white-space: nowrap; font-weight: 500; }
 .pill.public { color: var(--channel-soft); border-color: color-mix(in srgb, var(--channel) 40%, transparent); }
@@ -305,7 +308,14 @@ body.replaying .replaybtn, body.layout-board .replaybtn, body.layout-map .replay
 
 /* right pane */
 #pane { grid-area: pane; width: 0; overflow: hidden; border-left: 1px solid var(--line); background: var(--side); display: flex; flex-direction: column; min-height: 0; }
-#pane.open { width: 400px; }
+#pane.open { width: min(var(--pane-w, 400px), 50vw); }
+/* handles on the sidebar's edge and the pane's, to drag either wider or narrower */
+.grip { position: absolute; z-index: 6; top: 0; bottom: 0; right: -4px; width: 8px; cursor: col-resize; touch-action: none; outline: none; }
+.grip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; transition: background .15s; }
+.grip:hover::after, .grip:focus-visible::after, .grip.on::after { background: var(--accent); }
+.grip[data-grip="pane"] { position: relative; grid-area: pane; justify-self: start; right: auto; margin-left: -4px; display: none; }
+#pane.open + .grip[data-grip="pane"] { display: block; }
+body.resizing { cursor: col-resize; user-select: none; }
 #pane .phead { display: flex; align-items: center; gap: 8px; height: 52px; padding: 0 14px; border-bottom: 1px solid var(--line); flex: none; }
 #pane .phead h2 { margin: 0; font-size: 15px; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #pane .close { width: 28px; height: 28px; border-radius: 6px; color: var(--muted); font-size: 18px; }
@@ -398,7 +408,8 @@ h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .7px; color: va
 .tvb .loading { padding: 18px; color: var(--muted); }
 .tvn { padding: 8px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; }
 .palette { position: absolute; left: 50%; top: 12vh; transform: translateX(-50%); width: min(680px, 92vw); background: var(--panel); border: 1px solid var(--line2); border-radius: 14px; box-shadow: 0 30px 80px var(--shadow); overflow: hidden; }
-.palette input { width: 100%; padding: 16px 18px; background: transparent; border: 0; border-bottom: 1px solid var(--line); outline: none; font-size: 16px; }
+.palette .pq { display: flex; align-items: center; border-bottom: 1px solid var(--line); }
+.palette input { flex: 1; min-width: 0; padding: 16px 18px; background: transparent; border: 0; outline: none; font-size: 16px; }
 .palette .res { max-height: 56vh; overflow-y: auto; padding: 6px 0; }
 .palette .grp { color: var(--faint); font-size: 11.5px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; padding: 8px 18px 4px; }
 .palette .it { display: flex; align-items: center; gap: 10px; padding: 7px 18px; cursor: pointer; }
@@ -427,7 +438,7 @@ mark { background: light-dark(rgba(250, 204, 21, .45), rgba(250, 204, 21, .28));
 .mapwrap .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .mapwrap .stage canvas.layer { pointer-events: none; }
 .mapwrap .stage.web canvas.layer:nth-child(2) { z-index: 1; }
-.mapwrap canvas.graph { cursor: grab; }
+.mapwrap canvas.graph { cursor: grab; touch-action: none; }  /* a finger drags and pinches the map, not the page */
 .mapwrap canvas.graph.drag { cursor: grabbing; }
 .mapwrap canvas.graph.point { cursor: pointer; }
 .legend { position: absolute; left: 14px; top: 12px; max-width: min(320px, calc(100% - 230px)); display: flex; flex-wrap: wrap; align-items: center; gap: 5px 14px; background: var(--legend-bg); border: 1px solid var(--line); border-radius: 10px; padding: 6px 12px; font-size: 12px; }
@@ -509,3 +520,178 @@ body.layout-map #bar, body.replaying #bar { display: flex; }
 .msg.cont:hover::before { content: attr(data-time); position: absolute; left: 20px; width: 36px; text-align: center; top: 5px; font-size: 10.5px; line-height: 14px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .busy { width: 34px; height: 4px; border-radius: 2px; background: var(--line); flex: none; overflow: hidden; }
 .busy i { display: block; height: 100%; background: color-mix(in srgb, var(--accent) 75%, transparent); border-radius: 2px; }
+
+/* ------------------------------------------------------------------ touch, tablets and phones */
+
+/* A finger needs bigger targets than a mouse. The sidebar's rows are 44px, as the list in app.js counts them. */
+@media (pointer: coarse) {
+  body { touch-action: manipulation; }
+  input, select, textarea { font-size: 16px !important; }  /* smaller, and iOS zooms the page in when one is focused */
+  .row { height: 44px; font-size: 15px; gap: 10px; }
+  .row .n { font-size: 12.5px; }
+  .row.head { font-size: 12px; padding-top: 12px; }
+  .ico { width: 20px; height: 20px; font-size: 13px; }
+  .av.sm { width: 24px; height: 24px; font-size: 10.5px; }
+  .av.xs { width: 22px; height: 22px; font-size: 9.5px; }
+  .tabs button { padding: 8px 0; }
+  .grip { width: 16px; right: -8px; }
+  .grip[data-grip="pane"] { margin-left: -8px; }
+  .seg button { padding: 6px 14px; }
+  .btn { height: 34px; padding: 0 12px; font-size: 13px; }
+  .sorts button { padding: 7px 12px; }
+  .pop .it { padding: 10px 14px; }
+}
+/* Nothing hovers under a finger: a tap on a message shows what a mouse shows over it. */
+@media (hover: none) {
+  kbd { display: none; }
+  .msg:hover { background: none; }
+  .msg.cont:hover::before { content: none; }
+  .msg:hover .actions { display: none; }
+  .msg { flex-wrap: wrap; }
+  .msg.act { background: var(--msg-hover); }
+  .msg.act .actions { display: flex; position: static; flex-basis: 100%; flex-wrap: wrap; margin: 6px 0 4px 44px; box-shadow: none; }
+  .tree .msg.act .actions, .comments .msg.act .actions { margin-left: 34px; }
+  .actions button { padding: 7px 10px; font-size: 13px; }
+}
+
+/* A tablet: a narrower sidebar, and a thread slides over the chat instead of narrowing it. The map gets the whole
+   width beside its pane. */
+@media (min-width: 700px) and (max-width: 1100px) {
+  #app { grid-template-columns: min(var(--side-w, 240px), 40vw) minmax(0, 1fr) auto; }
+  #stats { display: none; }
+  #top { gap: 10px; }
+  #pane:not(.mappane) { position: fixed; z-index: 15; top: calc(48px + env(safe-area-inset-top)); right: 0; bottom: 0; box-shadow: -16px 0 40px var(--shadow); }
+  #pane:not(.mappane):not(.open) { visibility: hidden; }
+  #pane.open:not(.mappane) { width: min(420px, 92vw); }
+  body.layout-map #side { display: none; }
+  body.layout-map #app { grid-template-columns: 0 minmax(0, 1fr) auto; }
+  #pane.mappane.open { width: min(var(--pane-w, 340px), 50vw); }
+  #pane.open:not(.mappane) + .grip[data-grip="pane"] { display: none; }  /* a thread over the chat keeps its width */
+}
+@media (max-width: 900px) {
+  .find { width: 30px; padding: 0; justify-content: center; }
+  .find span, .find kbd, .replaybtn span { display: none; }
+  .live { font-size: 0; gap: 0; }
+  #bar { gap: 10px; padding: 0 12px; }
+  #bar .play { min-width: 0; padding: 0 14px; }
+  #bar .clock { width: 72px; }
+  #bar .speeds button { padding: 4px 8px; }
+}
+
+/* A phone, like a chat app: one screen at a time. The chat list is the first screen, a chat opens over it with a way
+   back, and a bar along the bottom moves between chats, people, the board, the map and search. On the map, what is
+   picked opens in a sheet under it. */
+@media (max-width: 699px) {
+  #app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+    grid-template-areas: "top" "main" "pane" "bar" "nav"; padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left); }
+  body.opened #app { padding-bottom: env(safe-area-inset-bottom); }
+  #top { height: 52px; padding: 0 10px 0 14px; gap: 8px; }
+  #layouts, .find, #stats { display: none; }
+  .brand { font-size: 18px; }
+  .brand span { display: none; }
+  .replaybtn { width: 34px; height: 34px; padding: 0; display: grid; place-items: center; font-size: 12px; }
+  .as { height: 34px; min-width: 0; max-width: 46vw; }
+  .as > span:not(.av):not(.x) { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .as .pre { display: none; }
+  .as .who { text-transform: capitalize; }
+  .theme { width: 34px; height: 34px; }
+
+  #side { grid-area: main; border-right: 0; }
+  .grip { display: none !important; }
+  #tabs { display: none; }
+  #filter { margin: 10px 12px 6px; padding: 9px 12px; border-radius: 10px; }
+  .vrows { left: 6px; right: 6px; }
+  body:not(.layout-chat) #side, body.layout-chat.opened #side { display: none; }
+  body.layout-chat:not(.opened) #main { display: none; }
+
+  /* a screen opened from the list has its own header, with the way back at its left */
+  body.opened #top, body.opened #tabbar { display: none; }
+  body.opened #back { display: grid; }
+  #back { position: fixed; z-index: 6; top: calc(env(safe-area-inset-top) + 8px); left: calc(env(safe-area-inset-left) + 4px); width: 40px; height: 40px; place-items: center; border-radius: 10px; color: var(--text); }
+  #back:active { background: var(--hover); }
+  #back svg { width: 24px; height: 24px; }
+  body.opened #main .mhead { padding-left: 50px; }
+  body.opened .person { padding-top: 60px; }
+  .mhead [data-back] { display: none; }
+  .mhead { min-height: 56px; padding: 8px 12px; gap: 4px 8px; }
+  .mhead h1 { flex: 0 1 auto; min-width: 0; max-width: none; font-size: 17px; }
+  .mhead .pill, .mhead .about, .mhead .grow { display: none; }
+  .mhead > .btn { margin-left: auto; }
+  .mhead .sub { order: 2; flex-basis: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mhead .sorts { order: 3; flex-basis: 100%; }
+
+  /* text as large as a chat app's on a phone */
+  .text { font-size: 16px; line-height: 24px; }
+  .head { line-height: 24px; }
+  .head .name { font-size: 16px; }
+  .head time, .head .chat { font-size: 12.5px; }
+  .quote { font-size: 14px; }
+  .post .ptitle { font-size: 16.5px; }
+  .post .pbody { font-size: 14.5px; }
+  #pane.mappane .text { font-size: 15px; line-height: 22px; }
+  #pane.mappane .head .name { font-size: 15px; }
+  .msg { padding: 9px 14px 3px; }
+  .sys { padding: 5px 14px 5px 58px; font-size: 14px; }
+  .daysep { margin: 14px 14px 6px; }
+  .divider { margin: 10px 14px; }
+  .banner { margin: 8px 12px 0; }
+  .actions { right: 8px; }
+  .posts, .thread-page { padding: 10px 10px 24px; }
+  .post { padding: 10px 12px; gap: 8px; }
+  .votes { width: 32px; }
+  .person { padding: 18px 14px 32px; }
+  .card { flex-wrap: wrap; gap: 14px; }
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+  /* a thread, or what a sender had read, is a screen of its own */
+  #pane:not(.mappane) { position: fixed; inset: 0; z-index: 18; width: auto !important; border: 0; box-shadow: none; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  #pane:not(.mappane):not(.open) { display: none; }
+  #pane .phead { height: 56px; }
+  #pane .close { width: 40px; height: 40px; font-size: 26px; }
+
+  /* the map fills the screen, and a chat or agent picked on it opens in a sheet below */
+  #pane.mappane { width: auto !important; height: 0; border-left: 0; }
+  body.picked #pane.mappane.open { height: 44dvh; border-top: 1px solid var(--line); box-shadow: 0 -10px 30px var(--shadow); }
+  body.picked:not(.replaying) #bar { display: none; }  /* the map keeps its room; Replay is a tap away when the sheet closes */
+  #pane.mappane .mhead { padding-right: 52px; }
+  .sheetx { display: grid; place-items: center; position: absolute; z-index: 2; top: 8px; right: 6px; width: 40px; height: 40px; border-radius: 10px; color: var(--muted); font-size: 26px; }
+  .legend { left: 10px; top: 10px; max-width: calc(100% - 160px); padding: 5px 10px; gap: 5px 10px; }
+  .legend .lbl, .legend .shapes, .legend .hint { display: none; }
+  .legend:hover { z-index: 3; max-width: calc(100% - 20px); }
+  .legend:hover .lbl { display: inline-flex; }
+  .legend:hover .shapes { display: flex; }
+  .legend:hover .hint { display: inline; }
+  .mapctl { right: 10px; top: 10px; gap: 4px; }
+  body.picked .legend { display: none; }  /* the ring gets the little room the sheet leaves */
+
+  /* the replay's controls in two rows */
+  body.layout-map #bar, body.replaying #bar { display: grid; }
+  #bar { grid-template-columns: auto minmax(0, 1fr) auto auto; grid-template-areas: "play track track clock" "speeds speeds quiet live";
+    height: auto; padding: 8px 12px; gap: 8px 10px; }
+  #bar .play { grid-area: play; min-width: 0; height: 34px; padding: 0 14px; }
+  #bar .track { grid-area: track; min-width: 0; height: 34px; }
+  #bar .clock { grid-area: clock; width: 64px; }
+  #bar .clock b { font-size: 14px; }
+  #bar .speeds { grid-area: speeds; justify-self: start; min-width: 0; }
+  #bar .speeds button { padding: 5px 7px; font-size: 12px; }
+  #bar .btn { height: 30px; padding: 0 9px; font-size: 12.5px; }
+  #bar [data-quiet] { grid-area: quiet; }
+  #bar [data-live] { grid-area: live; }
+
+  #tabbar { grid-area: nav; display: flex; border-top: 1px solid var(--line); background: var(--side); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  #tabbar button { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 7px 0 6px; color: var(--muted); font-size: 10.5px; font-weight: 600; }
+  #tabbar button.on { color: var(--text); }
+  #tabbar svg { width: 23px; height: 23px; }
+
+  /* search, pickers and files take the screen, or rise from its bottom */
+  .palette { top: 0; left: 0; transform: none; width: 100%; height: 100%; border: 0; border-radius: 0; display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  .palette .res { max-height: none; flex: 1; }
+  .palette .it { padding: 10px 16px; }
+  .palette .cancel { display: block; padding: 0 16px; height: 100%; color: var(--link); font-weight: 600; }
+  .pop { left: 8px !important; right: 8px; top: auto !important; bottom: calc(8px + env(safe-area-inset-bottom)); min-width: 0; max-width: none; max-height: 70dvh; border-radius: 14px; }
+  .tv { left: 0; top: 0; transform: none; width: 100%; height: 100%; border: 0; border-radius: 0; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  .tvh { flex-wrap: wrap; }
+  .tvb .md { padding: 18px 16px 40px; }
+  .lightbox .cap { flex-wrap: wrap; }
+}

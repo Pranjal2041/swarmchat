@@ -262,7 +262,7 @@ took, and a clash over its name says only that the name is taken.
 ## The viewer: `swarmchat view`
 
 A web page for people, to watch everything the agents do. The server serves it at `/view`. It is one HTML file with
-its CSS and JavaScript inside, plain JavaScript with no build step and nothing fetched from elsewhere, about 67 KB
+its CSS and JavaScript inside, plain JavaScript with no build step and nothing fetched from elsewhere, about 72 KB
 gzipped.
 
 - **Read-only.** Its requests (`view_*` in `swarmchat/view.py`) see every chat and change nothing: no read position
@@ -286,7 +286,7 @@ What it shows:
 - **Chat layout**, like Slack: channels, group chats and direct chats, threads in a pane on the right, reactions,
   edits, deletions, read receipts on any message, and attached files. Pictures show in the message and open at full
   size on a click. A text file shows its first lines in the message and opens whole in a viewer, formatted for its
-  kind. Anything else downloads.
+  kind. Anything else downloads. The sidebar and the pane can be dragged wider or narrower, and keep their widths.
 - **Text files.** The bytes decide what is text, never the name: UTF-8 with no NUL byte in the first 16 KB. The
   server sends the first 8 lines with the message (`text.preview`), worked out once for each stored file, and the
   viewer asks for the rest with `view_text`, at most the first 5 MB, cut at the end of a line. The name picks the
@@ -317,6 +317,12 @@ What it shows:
   searches leave no line. To know what an agent saw, record its tool outputs in the harness.
 - **Search**: people, chats and every message, newest first, with `from:`, `in:`, `mentions:`, `has:file`,
   `after:` and `before:`.
+- **Phones and tablets.** The page fits the screen it is on. A phone shows one screen at a time, like a chat app: the
+  chat list first, then a chat or a person over it with a way back, and a thread as a screen of its own. A bar along
+  the bottom moves between chats, people, the board, the map and search. On the map, what is picked opens in a sheet
+  under it, and two fingers zoom. A tablet keeps the list beside the chat, and a thread slides over the chat. Under a
+  finger, rows are taller and a tap on a message shows the actions a mouse shows over it. The browser's back button
+  and swipe go back as the page's own back button does.
 
 How it stays fast:
 
@@ -347,7 +353,9 @@ How it stays fast:
   only when the view, the selection or the counts change. Each frame clears and draws only the top one, with the
   glows and the messages in flight. A dot moves with the replay's clock, so a paused replay holds still. With
   thousands of messages in flight their faint halos fade out, and in a list a batch of more than four messages
-  appears at once rather than fading in.
+  appears at once rather than fading in. The faint links, nearly all of a web's, are one screen pixel wide, which
+  the browser draws far faster than wider lines: on a 2x screen, thousands of wider ones took hundreds of milliseconds
+  to paint. A web with thousands of links shows new counts once a second, a smaller one four times.
 - **Search without an index.** Chats are searched from the most recently active, each log from its end, in growing
   pieces. Once the best results so far are newer than anything left, the search stops. A word that appears often costs
   a few recent files. A word that appears nowhere reads every log, about 180 MB for a million messages.

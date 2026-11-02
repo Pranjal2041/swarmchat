@@ -70,6 +70,12 @@ function initials(name) {
   const w = String(name).replace(/[^\p{L}\p{N} ]/gu, ' ').trim().split(/\s+/).filter(Boolean);
   return ((w[0] || '?')[0] + (w.length > 1 ? w[w.length - 1][0] : (w[0] || '')[1] || '')).toUpperCase();
 }
+// The page's shape follows the screen. A phone shows one screen at a time, a finger gets bigger rows than a mouse, and
+// with nothing to hover with, a tap on a message shows what the mouse shows over it.
+const PHONE = matchMedia('(max-width: 699px)');
+const COARSE = matchMedia('(pointer: coarse)');
+const HOVERLESS = matchMedia('(hover: none)');
+
 function throttle(fn, wait) {
   let last = 0, t = null;
   return () => {
@@ -188,7 +194,7 @@ async function loadSnapshot() {
 
 // ---------------------------------------------------------------------- the address bar holds where you are
 
-const KEYS = ['layout', 'chat', 'm', 'had', 'thread', 'knew', 'as', 'person', 'q', 'unread', 'post', 'sort'];
+const KEYS = ['layout', 'chat', 'm', 'had', 'thread', 'knew', 'as', 'person', 'q', 'unread', 'post', 'sort', 'all'];
 function readRoute() {
   const p = new URLSearchParams(location.hash.slice(1));
   const r = {};
@@ -197,17 +203,32 @@ function readRoute() {
   return r;
 }
 // Goes somewhere. Keys set to null are dropped. Without keep, only the layout and the agent seen as come along.
-function go(changes, keep = false) {
+function hashOf(changes, keep = false) {
   const base = keep ? {...S.route} : {layout: S.route.layout, as: S.route.as};
   const r = {...base, ...changes};
   const p = new URLSearchParams();
   for (const k of KEYS) if (r[k] != null && r[k] !== '') p.set(k, r[k]);
-  const hash = '#' + p.toString();
-  if (location.hash !== hash) location.hash = hash; else route();
+  return '#' + p.toString();
+}
+function go(changes, keep = false) {
+  const hash = hashOf(changes, keep);
+  if (location.hash !== hash) { S.from = location.hash; location.hash = hash; } else route();
+}
+// Goes back as the browser's back button does, when the place before was in this page and, if `changes` are given,
+// is the place they lead to. Otherwise goes to `changes`. Each place keeps the one it came from in history.state.
+function back(changes, keep = false) {
+  const prev = history.state && history.state.from;
+  if (prev != null && (!changes || prev === hashOf(changes, keep))) return history.back();
+  go(changes || {}, keep);
+}
+// Whether a phone shows a screen of its own, with a way back, rather than a layout's first screen
+function opened(r) {
+  return r.layout !== 'map' && !!(r.chat || r.person || r.q || r.unread || r.post || (r.layout === 'chat' && r.all));
 }
 
 function viewKey(r) {
   if (r.layout === 'map') return 'map';
+  if (r.layout === 'chat' && PHONE.matches && !opened(r)) return 'home';
   if (r.q) return `q|${r.q}|${r.as}`;
   if (r.person) return `person|${r.person}`;
   if (r.unread && r.as) return `unread|${r.as}`;
@@ -216,10 +237,16 @@ function viewKey(r) {
 }
 
 async function route() {
+  if (S.from != null) { history.replaceState({from: S.from}, ''); S.from = null; }
   const prev = S.route;
   S.route = readRoute();
-  const r = S.route;
-  for (const l of ['chat', 'board', 'map']) document.body.classList.toggle('layout-' + l, l === r.layout);
+  const r = S.route, body = document.body, deep = opened(r), was = body.classList.contains('opened');
+  const hide = PHONE.matches && deep && !was, show = PHONE.matches && was && !deep;
+  if (hide) side.top = side.list ? side.list.scrollTop : 0;  // a phone's list keeps its place under an opened screen
+  for (const l of ['chat', 'board', 'map']) body.classList.toggle('layout-' + l, l === r.layout);
+  body.classList.toggle('opened', deep);
+  body.classList.toggle('picked', r.layout === 'map' && !!(r.chat || r.person));
+  if (show && side.list) side.list.scrollTop = side.top || 0;
   if (replay.on && r.layout === 'board') await replay.exit(false);  // a board is only shown live
   if (r.as !== prev.as) await (replay.on ? replay.reload() : loadAs());
   const key = viewKey(r);
@@ -231,6 +258,7 @@ async function route() {
     const main = $('#main');
     main.replaceChildren();
     S.view = r.layout === 'map' ? new MapView(main)
+      : key === 'home' ? new HomeView()
       : r.q ? new SearchView(main, r.q)
       : r.person ? new PersonView(main, r.person)
       : r.unread && r.as ? new UnreadView(main)
@@ -279,6 +307,7 @@ const refreshAs = throttle(async () => {
 function renderTop() {
   const r = S.route;
   for (const b of $$('#layouts button')) b.classList.toggle('on', b.dataset.layout === r.layout);
+  for (const b of $$('#tabbar button')) b.classList.toggle('on', b.dataset.nav === (r.layout === 'chat' ? S.tab : r.layout));
   const agents = [...S.users.values()].filter(u => !u.removed).length;
   const now = Date.now();
   S.rate = S.rate.filter(t => now - t < 10000);
@@ -287,8 +316,8 @@ function renderTop() {
   $('#stats').innerHTML = html`<b>${num(agents)}</b> agents · <b>${num(chats)}</b> chats · <b>${num(S.total)}</b> messages${replay.on ? ' so far' : ''}${rate ? html` · <b>${rate < 10 ? rate.toFixed(1) : Math.round(rate)}</b>/s` : ''}`;
   const as = $('#as');
   as.classList.toggle('on', !!r.as);
-  as.innerHTML = r.as ? html`${avatar(r.as, 'sm')}<span>As <b>${name(r.as)}</b></span><span class="x" data-clear-as title="See everything again">×</span>`
-    : html`<span>As everyone</span><span>▾</span>`;
+  as.innerHTML = r.as ? html`${avatar(r.as, 'sm')}<span><span class="pre">As </span><b>${name(r.as)}</b></span><span class="x" data-clear-as title="See everything again">×</span>`
+    : html`<span><span class="pre">As </span><span class="who">everyone</span></span><span>▾</span>`;
 }
 setInterval(() => renderTop(), 2000);
 
@@ -328,6 +357,7 @@ const side = {
     });
   },
   build() {
+    this.h = COARSE.matches ? 44 : 30;  // as tall as .row in the stylesheet
     for (const b of $$('#tabs button')) b.classList.toggle('on', b.dataset.tab === S.tab);
     $('#filter').placeholder = S.tab === 'people' ? 'Filter people' : 'Filter chats';
     this.rows = S.tab === 'people' ? peopleRows() : chatRows();
@@ -350,7 +380,7 @@ function chatRows() {
   const special = (label, icon, on, open, n) => ({open, html: i => html`<div class="row special${on ? ' on' : ''}" data-i="${i}"><span class="ico">${icon}</span><span class="t">${label}</span>${n ? html`<span class="badge">${num(n)}</span>` : ''}</div>`.s});
   if (!f) {
     if (r.layout === 'board') rows.push(special('Front page', '★', !r.chat && !r.post && !r.q && !r.person && !r.unread, () => go({chat: null})));
-    else rows.push(special('All activity', '≋', !r.chat && !r.q && !r.person && !r.unread, () => go({chat: null, person: null})));
+    else rows.push(special('All activity', '≋', !r.chat && !r.q && !r.person && !r.unread, () => go({all: 1})));
     if (r.as && S.as && !replay.on) rows.push(special(`${first(r.as)}'s unread`, '✉', !!r.unread, () => go({unread: 1}),
       S.as.order.reduce((n, id) => n + (S.as.chats.get(id).unread || 0), 0)));
   }
@@ -1254,6 +1284,9 @@ ${c.description && !this.o.inPane ? html`<div class="about" title="${c.descripti
   destroy() { this.dead = true; }
 }
 
+// A phone's first screen in the chat layout is the list itself, and nothing is drawn behind it.
+class HomeView { onSeek() {} }
+
 // ---------------------------------------------------------------------- lists of messages from many chats
 
 // A few new messages fade in as they arrive. A larger batch, as a fast replay brings every fifth of a second, just
@@ -1614,7 +1647,7 @@ const overlay = {
 function openSearch(initial = '') {
   const box = document.createElement('div');
   box.className = 'palette';
-  box.innerHTML = html`<input placeholder="Search messages, people and chats" spellcheck="false"><div class="res"></div><div class="hint">Enter searches every message. Narrow it with <code>from:alice</code> <code>in:#ops</code> <code>mentions:bob</code> <code>has:file</code> <code>after:2026-10-01</code> <code>before:…</code></div>`.s;
+  box.innerHTML = html`<div class="pq"><input placeholder="Search messages, people and chats" spellcheck="false"><button class="cancel" data-dismiss>Cancel</button></div><div class="res"></div><div class="hint">Enter searches every message. Narrow it with <code>from:alice</code> <code>in:#ops</code> <code>mentions:bob</code> <code>has:file</code> <code>after:2026-10-01</code> <code>before:…</code></div>`.s;
   overlay.open(box);
   const input = $('input', box), res = $('.res', box);
   let items = [], sel = 0;
@@ -1785,6 +1818,15 @@ function onClick(e) {
   const t = e.target;
   const hit = sel => t.closest(sel);
   let el;
+  if (hit('#back')) return back();
+  if ((el = hit('[data-nav]'))) {
+    const nav = el.dataset.nav;
+    if (nav === 'search') return openSearch();
+    if (nav === 'chats' || nav === 'people') { S.tab = nav; return go({layout: 'chat'}); }
+    return go({layout: nav});
+  }
+  if (hit('[data-dismiss]')) return overlay.close();
+  if (hit('[data-unpick]')) return go({chat: null, person: null});
   if ((el = hit('[data-layout]'))) {
     const layout = el.dataset.layout, r = S.route;
     return go({layout, chat: r.chat, as: r.as, person: layout === 'map' ? null : r.person, q: layout === 'map' ? null : r.q});
@@ -1805,14 +1847,14 @@ function onClick(e) {
   if ((el = hit('[data-knew]'))) return go({knew: el.dataset.knew, thread: null, ...away(el.dataset.knew)}, true);
   if ((el = hit('[data-receipts]'))) return openReceipts(el, el.dataset.receipts);
   if ((el = hit('[data-copy]'))) { navigator.clipboard?.writeText(el.dataset.copy); return toast(`Copied ${el.dataset.copy}`); }
-  if (hit('[data-close-pane]')) return go({thread: null, knew: null}, true);
+  if (hit('[data-close-pane]')) return back({thread: null, knew: null}, true);
   if ((el = hit('[data-fold]'))) return fold(el);
   if ((el = hit('[data-more]'))) { el.previousElementSibling.classList.remove('long'); return el.remove(); }
   if ((el = hit('[data-members]'))) return openMembers(el, el.dataset.members);
   if ((el = hit('[data-sort]'))) return go({sort: el.dataset.sort}, true);
   if ((el = hit('[data-board]'))) return go({layout: 'board', chat: el.dataset.board});
   if ((el = hit('[data-goto]'))) return go({layout: el.dataset.goto, chat: S.route.chat || (S.view && S.view.chat), post: null}, false);
-  if (hit('[data-back]')) return history.length > 1 ? history.back() : go({post: null}, true);
+  if (hit('[data-back]')) return back({post: null}, true);
   if (hit('[data-open-post-chat]')) return go({layout: 'chat', chat: S.view.chat, m: +S.view.id.split(':')[1]});
   if ((el = hit('[data-had]'))) return go({layout: 'chat', chat: el.dataset.had, m: el.dataset.upto || 1, had: el.dataset.upto, knew: S.route.knew});
   if ((el = hit('[data-jump]'))) {
@@ -1826,12 +1868,18 @@ function onClick(e) {
     if (S.route.layout === 'map') return go({chat: el.dataset.chat, person: null});
     return go({layout: S.route.layout === 'board' ? 'board' : 'chat', chat: el.dataset.chat, m: el.dataset.seq, q: null, person: null});
   }
+  if (HOVERLESS.matches && (el = hit('.msg')) && !hit('a, button, .actions')) {  // a tap shows the message's actions
+    const was = el.classList.contains('act');
+    for (const m of $$('.msg.act')) m.classList.remove('act');
+    el.classList.toggle('act', !was);
+    if (!was) $('.actions', el).scrollIntoView({block: 'nearest'});
+  }
 }
 
 function onKey(e) {
   const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || '');
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); return overlay.on ? overlay.close() : openSearch(); }
-  if (e.key === 'Escape') { if (overlay.on) return overlay.close(); if (S.route.thread || S.route.knew) return go({thread: null, knew: null}, true); }
+  if (e.key === 'Escape') { if (overlay.on) return overlay.close(); if (S.route.thread || S.route.knew) return back({thread: null, knew: null}, true); }
   if (e.key === 'Enter' && document.activeElement?.dataset.text) return openText(document.activeElement.dataset.text);
   if (typing || overlay.on || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === '/') { e.preventDefault(); return openSearch(); }
@@ -1847,6 +1895,7 @@ function onKey(e) {
 
 function tips() {
   const tip = $('#tip');
+  document.addEventListener('touchstart', () => tip.classList.remove('on'), {passive: true});  // a tap's tip goes at the next touch
   document.addEventListener('mouseover', e => {
     const el = e.target.closest('[data-tip]');
     if (!el) return tip.classList.remove('on');
@@ -1933,7 +1982,9 @@ const replay = {
       if (this.on) this.seek(timeAt(e));
     });
     this.track.addEventListener('pointerleave', () => this.hov.classList.remove('on'));
-    new ResizeObserver(([e]) => { this.tw = e.contentRect.width; this.th = e.contentRect.height; this.draw(true); }).observe(this.track);
+    // only the strip is drawn again: a change to the buttons here would resize the bar while the browser is still
+    // telling of its last size
+    new ResizeObserver(([e]) => { this.tw = e.contentRect.width; this.th = e.contentRect.height; this.drawn.bucket = null; this.draw(); }).observe(this.track);
     setInterval(() => { if (this.shown && !this.on) this.activity(); }, 30000);  // a live run grows
   },
 
@@ -2185,7 +2236,7 @@ const replay = {
 // Categorical colours in a fixed order, made to be told apart on a light or a dark background. Past eight, the rest are "other".
 const PALETTE = ['#4269d0', '#efb118', '#ff725c', '#6cc5b0', '#3ca951', '#ff8ab7', '#a463f2', '#97bbf5'];
 const OTHER = '#7b8394';
-const MAP = {pos: new Map(), view: null, colorBy: null, lens: true, mode: null};  // kept while the page is open
+const MAP = {pos: new Map(), view: null, colorBy: null, lens: !COARSE.matches, mode: null};  // kept while the page is open
 const RING = 300;  // the radius of the ring agents sit on, in the map's own units
 const RING_MOST = 60;  // more agents than this are laid out as a web
 
@@ -2270,13 +2321,12 @@ class MapView {
   }
   destroy() {
     this.dead = true; this.resize.disconnect(); if (this.worker) this.worker.terminate();
-    removeEventListener('mouseup', this.up);
     cancelAnimationFrame(this.raf); this.raf = 0; S.mapPane = false;
     if (this.side && this.side.destroy) this.side.destroy();
     $('#pane').classList.remove('open', 'mappane'); $('#pane').replaceChildren();
   }
   size() {
-    const dpr = devicePixelRatio || 1, c = this.canvas, r = c.getBoundingClientRect();
+    const dpr = Math.min(2, devicePixelRatio || 1), c = this.canvas, r = c.getBoundingClientRect();  // 3, as on many phones, would draw 2.25 times as many pixels for no gain anyone sees
     for (const x of [this.base, this.fly, c]) { x.width = Math.max(1, Math.round(r.width * dpr)); x.height = Math.max(1, Math.round(r.height * dpr)); }
     c.w = r.width; c.h = r.height;
     this.dpr = dpr;
@@ -2309,6 +2359,8 @@ class MapView {
     const nbrs = new Map();
     for (const e of edges) { (nbrs.get(e.a) || nbrs.set(e.a, []).get(e.a)).push(e.b); (nbrs.get(e.b) || nbrs.set(e.b, []).get(e.b)).push(e.a); }
     this.nodes = nodes; this.index = index; this.edges = edges; this.nbrs = nbrs;
+    // New counts are shown four times a second, or once on a web of thousands of links, which takes long to paint
+    if ((edges.length > 2000) !== this.big) { this.big = edges.length > 2000; this.reweigh = throttle(() => { if (!this.dead) this.weigh(); }, this.big ? 1000 : 250); }
     this.direct = new Map(edges.filter(e => e.kind === 'direct').map(e => [e.chat, e]));
     MAP.mode ||= nodes.filter(n => n.kind === 'agent').length <= RING_MOST ? 'ring' : 'web';
     this.controls();
@@ -2765,9 +2817,13 @@ ${items.map(([label, c, cnt]) => html`<span class="li" title="${label}${cnt != n
     const alpha = [0.035, 0.09, 0.2, 0.42, 0.85];
     ctx.lineCap = 'round';
     for (const [key, pts] of buckets) {
-      const level = +key[1];
+      // The faint links, nearly all of them, are one screen pixel wide. The browser draws a line that thin in a fast
+      // way of its own: thousands of 1px lines on a 2x screen took it hundreds of milliseconds each time the counts
+      // changed, and those at one pixel a few. Thin lines that cross add up where wider ones in one path did not, so
+      // their alpha is left as it was, and the busy middle looks much as before.
+      const level = +key[1], thin = level < 3;
       ctx.strokeStyle = key[0] === 'd' ? `rgba(${ink().edgeDm}, ${alpha[level]})` : `rgba(${ink().edge}, ${alpha[level] * 0.8})`;
-      ctx.lineWidth = level >= 3 ? 1.6 : 1;
+      ctx.lineWidth = thin ? 1 / this.dpr : 1.6;
       ctx.beginPath();
       for (let i = 0; i < pts.length; i += 4) { ctx.moveTo(pts[i], pts[i + 1]); ctx.lineTo(pts[i + 2], pts[i + 3]); }
       ctx.stroke();
@@ -2853,32 +2909,62 @@ ${items.map(([label, c, cnt]) => html`<span class="li" title="${label}${cnt != n
     this.raf = requestAnimationFrame(loop);
   }
 
-  // ---- the mouse
+  // ---- the mouse and fingers
   listen() {
-    const c = this.canvas;
-    let down = null;
-    c.addEventListener('mousemove', e => {
-      const r = c.getBoundingClientRect();
-      this.mouse = {x: e.clientX - r.left, y: e.clientY - r.top};
+    const c = this.canvas, fingers = new Map();
+    const at = e => { const r = c.getBoundingClientRect(); return {x: e.clientX - r.left, y: e.clientY - r.top}; };
+    let down = null, pinch = null;
+    c.addEventListener('pointerdown', e => {
+      c.setPointerCapture(e.pointerId);
+      this.slop = e.pointerType === 'mouse' ? 0 : 12;  // a fingertip is less exact than a mouse
+      if (e.pointerType !== 'mouse') fingers.set(e.pointerId, at(e));
+      if (fingers.size === 2) {  // two fingers zoom about the point between them, and move the map as they move
+        const [p, q] = [...fingers.values()], v = this.view, mx = (p.x + q.x) / 2, my = (p.y + q.y) / 2;
+        pinch = {d: Math.max(10, Math.hypot(p.x - q.x, p.y - q.y)), k: v.k, wx: v.x + (mx - c.w / 2) / v.k, wy: v.y + (my - c.h / 2) / v.k};
+        down = null; this.dragging = true; this.mouse = null; this.card.hidden = true;
+        return;
+      }
+      down = {x: e.clientX, y: e.clientY, vx: this.view.x, vy: this.view.y}; this.dragging = false;
+      this.mouse = at(e);
+    });
+    c.addEventListener('pointermove', e => {
+      if (fingers.has(e.pointerId)) fingers.set(e.pointerId, at(e));
+      if (pinch) {
+        if (fingers.size < 2) return;
+        const [p, q] = [...fingers.values()], v = this.view, mx = (p.x + q.x) / 2, my = (p.y + q.y) / 2;
+        v.k = Math.max(0.03, Math.min(12, pinch.k * Math.hypot(p.x - q.x, p.y - q.y) / pinch.d));
+        v.x = pinch.wx - (mx - c.w / 2) / v.k; v.y = pinch.wy - (my - c.h / 2) / v.k;
+        return this.kick();
+      }
+      this.mouse = at(e);
       if (down) {
         const dx = e.clientX - down.x, dy = e.clientY - down.y;
-        if (Math.abs(dx) + Math.abs(dy) > 3) { this.dragging = true; c.classList.add('drag'); this.card.hidden = true; }
+        if (Math.abs(dx) + Math.abs(dy) > (e.pointerType === 'mouse' ? 3 : 8)) { this.dragging = true; c.classList.add('drag'); this.card.hidden = true; }
         if (this.dragging) { this.view.x = down.vx - dx / this.view.k; this.view.y = down.vy - dy / this.view.k; }
-      } else {
+      } else if (e.pointerType === 'mouse') {
         const hit = this.hit(this.mouse.x, this.mouse.y), edge = hit == null ? this.hitEdge(this.mouse.x, this.mouse.y) : null;
         if (hit !== this.hover || edge !== this.hoverEdge) { this.hover = hit; this.hoverEdge = edge; c.classList.toggle('point', hit != null || !!edge); }
         this.showCard();
       }
       this.kick();
     });
-    c.addEventListener('mouseleave', () => { this.mouse = null; this.hover = null; this.hoverEdge = null; this.card.hidden = true; this.kick(); });
-    c.addEventListener('mousedown', e => { down = {x: e.clientX, y: e.clientY, vx: this.view.x, vy: this.view.y}; this.dragging = false; });
-    addEventListener('mouseup', this.up = () => {
-      if (!down) return;
-      const clicked = !this.dragging;
+    const up = (e, cancel) => {
+      fingers.delete(e.pointerId);
+      if (pinch) {  // the last finger up ends a pinch, and taps nothing
+        if (!fingers.size) { pinch = null; this.dragging = false; }
+        return this.kick();
+      }
+      const clicked = down && !this.dragging && !cancel;
       down = null; this.dragging = false; c.classList.remove('drag');
       if (clicked && this.mouse) this.click(this.hit(this.mouse.x, this.mouse.y), this.hitEdge(this.mouse.x, this.mouse.y));
+      if (e.pointerType !== 'mouse') { this.mouse = null; this.hover = null; this.hoverEdge = null; }  // nothing stays under a lifted finger
       this.kick();
+    };
+    c.addEventListener('pointerup', e => up(e, false));
+    c.addEventListener('pointercancel', e => up(e, true));
+    c.addEventListener('pointerleave', e => {
+      if (e.pointerType !== 'mouse' || down) return;
+      this.mouse = null; this.hover = null; this.hoverEdge = null; this.card.hidden = true; this.kick();
     });
     c.addEventListener('wheel', e => {
       e.preventDefault();
@@ -2901,13 +2987,13 @@ ${items.map(([label, c, cnt]) => html`<span class="li" title="${label}${cnt != n
     for (let i = 0; i < this.nodes.length; i++) {
       const n = this.nodes[i];
       if (n.kind === 'hub' && replay.on && !S.chats.get(n.chat)?.born) continue;
-      const d = Math.hypot(n.sx - x, n.sy - y), r = this.radius(n, scale) + (MAP.mode === 'ring' ? 3 : 5);
+      const d = Math.hypot(n.sx - x, n.sy - y), r = this.radius(n, scale) + (MAP.mode === 'ring' ? 3 : 5) + (this.slop || 0);
       if (d < r && d < bd) { bd = d; best = i; }
     }
     return best;
   }
   hitEdge(x, y) {  // a direct chat's chord under the mouse
-    let best = null, bd = 5;
+    let best = null, bd = 5 + (this.slop || 0);
     for (const e of this.direct.values()) {
       if (!e.w && MAP.mode === 'ring') continue;
       const a = this.nodes[e.a], b = this.nodes[e.b], dx = b.sx - a.sx, dy = b.sy - a.sy, l = dx * dx + dy * dy;
@@ -2954,14 +3040,16 @@ ${Object.keys(u.fields || {}).length ? html`<div class="cf">${Object.entries(u.f
     const r = S.route, key = r.chat ? 'c:' + r.chat : r.person ? 'u:' + r.person : '';
     this.selected = key ? this.index.get(key) ?? null : null;
     this.selChat = r.chat && S.chats.get(r.chat)?.kind === 'direct' ? r.chat : null;
-    if (key !== this.sideKey) {
-      this.sideKey = key;
+    if (key + PHONE.matches !== this.sideKey) {
+      this.sideKey = key + PHONE.matches;
       if (this.side && this.side.destroy) this.side.destroy();
       const pane = $('#pane');
       pane.classList.add('open', 'mappane');
       pane.replaceChildren();
+      // On a phone the pane is a sheet under the map, for what is picked: every message as it comes has no room there.
       this.side = r.chat && S.chats.has(r.chat) ? new ChatView(pane, r.chat, {inPane: true})
-        : r.person ? new AgentPane(pane, r.person) : new ActivityView(pane, {inPane: true});
+        : r.person ? new AgentPane(pane, r.person) : PHONE.matches ? null : new ActivityView(pane, {inPane: true});
+      if (key) pane.insertAdjacentHTML('afterbegin', '<button class="sheetx" data-unpick title="Close" aria-label="Close">×</button>');
     }
     this.kick();
   }
@@ -2996,7 +3084,6 @@ ${Object.keys(u.fields || {}).length ? html`<div class="cf">${Object.entries(u.f
     this.kick();
   }
   regrow = throttle(() => { if (!this.dead) this.build(false); }, 3000);
-  reweigh = throttle(() => { if (!this.dead) this.weigh(); }, 250);
 }
 
 // An agent picked on the map: who it is, and its latest messages.
@@ -3058,6 +3145,7 @@ function showTheme() {
   const b = $('#theme');
   b.innerHTML = THEMES[t].icon;
   b.title = THEMES[t].title;
+  $('meta[name="theme-color"]').content = getComputedStyle($('#top')).backgroundColor;  // a phone's browser bar matches
   if (S.view && S.view.onTheme) S.view.onTheme();
   replay.draw(true);
 }
@@ -3076,6 +3164,55 @@ function ink() {
     bg: bare('--bg'), edge: bare('--edge'), edgeDm: bare('--edge-dm'), spoke: bare('--spoke')};
   probe.remove();
   return INK;
+}
+
+// ---------------------------------------------------------------------- widths
+
+// The sidebar and the pane beside the chat are as wide as their handles are dragged, and stay so in this browser. A
+// double click on a handle puts its default back, and the arrow keys move a handle that has the focus. The chat in
+// between keeps at least 400px.
+const WIDTHS_KEY = 'swarmchat.view.widths';
+const WIDE = {side: [180, 480], pane: [300, 760]};
+function grips() {
+  const app = $('#app'), saved = JSON.parse(localStorage.getItem(WIDTHS_KEY) || '{}');
+  const width = which => $(which === 'side' ? '#side' : '#pane').getBoundingClientRect().width;
+  const set = (which, w) => {
+    const other = which === 'side' ? width('pane') : width('side'), [lo, hi] = WIDE[which];
+    w = Math.round(Math.max(lo, Math.min(hi, innerWidth - other - 400, w)));
+    app.style.setProperty(`--${which}-w`, w + 'px');
+    return w;
+  };
+  const keep = (which, w) => {
+    if (w == null) delete saved[which]; else saved[which] = w;
+    localStorage.setItem(WIDTHS_KEY, JSON.stringify(saved));
+  };
+  for (const which in WIDE) if (saved[which]) app.style.setProperty(`--${which}-w`, saved[which] + 'px');
+  app.addEventListener('pointerdown', e => {
+    const g = e.target.closest('.grip');
+    if (!g || e.button !== 0) return;
+    e.preventDefault();
+    const which = g.dataset.grip, x0 = e.clientX, w0 = width(which), sign = which === 'side' ? 1 : -1;
+    let w = w0;
+    g.setPointerCapture(e.pointerId);
+    document.body.classList.add('resizing'); g.classList.add('on');
+    g.onpointermove = m => { w = set(which, w0 + sign * (m.clientX - x0)); };
+    g.onpointerup = g.onpointercancel = () => {
+      g.onpointermove = g.onpointerup = g.onpointercancel = null;
+      document.body.classList.remove('resizing'); g.classList.remove('on');
+      if (w !== w0) keep(which, w);
+    };
+  });
+  app.addEventListener('dblclick', e => {
+    const g = e.target.closest('.grip');
+    if (g) { app.style.removeProperty(`--${g.dataset.grip}-w`); keep(g.dataset.grip, null); }
+  });
+  app.addEventListener('keydown', e => {
+    const g = e.target.closest('.grip');
+    if (!g || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
+    e.preventDefault(); e.stopPropagation();  // not a step in a replay
+    const which = g.dataset.grip, sign = which === 'side' ? 1 : -1;
+    keep(which, set(which, width(which) + sign * (e.key === 'ArrowRight' ? 16 : -16)));
+  });
 }
 
 // ---------------------------------------------------------------------- start
@@ -3108,16 +3245,21 @@ async function start() {
   side.init();
   replay.init();
   tips();
-  document.addEventListener('click', onClick);
+  // On the app and the overlay rather than the document: Safari on a phone turns a tap into a click only where something
+  // below the document listens for clicks.
+  for (const el of [$('#app'), $('#overlay')]) el.addEventListener('click', onClick);
   new MutationObserver(watchPictures).observe(document.body, {childList: true, subtree: true});
   document.addEventListener('keydown', onKey);
   addEventListener('hashchange', route);
+  PHONE.addEventListener('change', () => route());
+  COARSE.addEventListener('change', () => side.build());
   await route();
   follow();
 }
 
 (async function boot() {
   showTheme();
+  grips();  // before anything is drawn, so a saved width shows at once
   const found = location.hash.match(/(^#|&)token=([0-9a-f]{16,})/);
   if (found) {
     localStorage.setItem('swarmchat.view.token', found[2]);
