@@ -63,6 +63,13 @@ def main():
     timed("activity: the whole run as a window", lambda: view.view_activity(store, {"buckets": 1, "from": r["start"], "to": r["end"]}))
     timed("as one agent, with what it would read", lambda: view.view_as(store, {"user": agent, "unread": True, "limit": 200}))
     timed("what an agent knew when it sent a message", lambda: view.view_knew(store, {"id": message_id}))
+    span = r["end"] - r["start"]
+    for share in (0.01, 0.5, 0.99):
+        timed(f"replay: every chat at {share:.0%} of the run", lambda: view.view_at(store, {"at": r["start"] + share * span}))
+    timed("replay: one agent's chats at the middle", lambda: view.view_at(store, {"at": mid, "as": agent, "mine": True}))
+    timed("replay: the next 2,000 messages", lambda: view.view_replay(store, {"after": mid}))
+    timed("replay: the next 20,000 messages", lambda: view.view_replay(store, {"after": mid, "limit": 20000}))
+    timed("replay: newest 150 of the busiest chat then", lambda: view.view_messages(store, {"chat": busiest.id, "at": mid, "limit": 150}))
     store.close()
 
 

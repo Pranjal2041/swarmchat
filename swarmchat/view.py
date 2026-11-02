@@ -19,6 +19,7 @@ import os
 import struct
 import threading
 import time
+from datetime import datetime, timezone
 
 from . import NAME, __version__, api
 from .store import Chat, Error, Store, epoch
@@ -80,6 +81,14 @@ def _tally(chat: Chat) -> tuple:
                 last[u] = times[i]
             chat.cache["tally"] = (n, sent, last)
         return sent, last
+
+
+def _counts(chat: Chat) -> tuple:
+    """(how many messages the tally covers, a copy of who wrote how many of them), taken together."""
+    _tally(chat)
+    with _tally_lock:
+        done, sent, _ = chat.cache["tally"]
+        return done, dict(sent)
 
 
 def _summary(store: Store, chat: Chat) -> dict:
@@ -367,13 +376,19 @@ def view_messages(store: Store, p: dict) -> dict:
     elif p.get("after") is not None:
         lo = bisect.bisect_right(seqs, int(p["after"]))
         hi = min(n, lo + limit)
+    elif p.get("at") is not None:  # the newest written by a moment, for a replay
+        n = len(chat.times)
+        hi = bisect.bisect_right(chat.times, float(p["at"]), 0, n)
+        lo = max(0, hi - limit)
     else:
         hi, lo = n, max(0, n - limit)
     wanted = list(seqs[lo:hi])
     lines = chat.system  # the chat's start comes with its first page, and the newest changes with its last
     first = 0 if lo == 0 else bisect.bisect_left(lines, wanted[0])
-    last = len(lines) if hi == n else bisect.bisect_right(lines, wanted[-1])
+    last = len(lines) if hi == n else bisect.bisect_right(lines, wanted[-1] if wanted else seqs[0])
     events = chat.read(sorted([*wanted, *lines[first:last]]))
+    if p.get("at") is not None:  # and no change to the chat after that moment
+        events = [e for e in events if e["kind"] == "message" or epoch(e["at"]) <= float(p["at"])]
     return {"chat": chat.id, "messages": _messages(store, chat, events), "first": lo == 0, "last": hi == n,
             "index": lo, "total": n, "positions": _positions(store, chat)}
 
@@ -708,6 +723,87 @@ def view_activity(store: Store, p: dict) -> dict:
     return out
 
 
+# ---------------------------------------------------------------------- a replay
+
+def _iso(t: float) -> str:
+    return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def view_at(store: Store, p: dict) -> dict:
+    """Every chat as it stood at the moment `at` (seconds since 1970), for a replay: how many messages it had by then,
+    the newest of them, who had written how many, and how many came in the RECENT seconds before. A chat made later
+    has `born` false. With `as`, that agent's read position in each of its chats then, and what it had not read, and
+    with `mine` as well, only that agent's chats. Worked out from what the server keeps in memory: no log is read."""
+    t = float(p["at"])
+    user = _user(store, p["as"]) if p.get("as") else None
+    stamp = _iso(t)
+    chats = list(store.chats.values())
+    if user is not None and p.get("mine"):
+        chats = [c for c in chats if user in c.members]
+    out = {}
+    for chat in chats:
+        n = len(chat.times)  # what a reader without the lock can count on
+        times, seqs, senders = chat.times, chat.messages, chat.senders
+        j = bisect.bisect_right(times, t, 0, n)
+        if j <= n // 2:  # who wrote how many by then, counted from whichever end is nearer
+            sent = dict(collections.Counter(senders[:j]))
+        else:
+            done, sent = _counts(chat)
+            for u, k in collections.Counter(senders[j:done]).items():
+                sent[u] -= k
+            sent = {u: k for u, k in sent.items() if k}
+        state = {"born": epoch(chat.meta["created_at"]) <= t, "messages": j, "sent": sent,
+                 "recent": j - bisect.bisect_left(times, t - RECENT, 0, j)}
+        if j:
+            state["last"] = {"seq": seqs[j - 1], "from": senders[j - 1], "at": _iso(times[j - 1])}
+            state["last_at"] = state["last"]["at"]
+        if user is not None and user in chat.members:
+            upto = chat.position_at(user, stamp)[0]
+            i = bisect.bisect_right(seqs, upto, 0, j)
+            mentioned = chat.mentions.get(user, ())
+            state["as"] = {"upto": upto, "unread": j - i - senders[i:j].count(user),
+                           "mentioned": bisect.bisect_right(mentioned, seqs[j - 1]) - bisect.bisect_right(mentioned, upto)
+                           if j > i else 0}
+        out[chat.id] = state
+    return {"at": t, "chats": out}
+
+
+def view_replay(store: Store, p: dict) -> dict:
+    """The messages written after a moment, oldest first, for a replay: each as [time, chat, seq, sender], from what
+    the server keeps in memory, so a replay at any speed reads no log and costs the agents nothing. `after` is a time
+    (seconds since 1970), or the last message already had, as [time, chat, seq]. At most `limit` come back, and
+    `more` says whether there are others after them. With `as`, only the chats that agent is in."""
+    after = p.get("after") or 0
+    if isinstance(after, list):
+        cursor = (float(after[0]), str(after[1]), int(after[2]))
+    else:
+        cursor = (float(after), "\U0010ffff", 0)  # past every chat id: nothing at that very time
+    limit = _int(p, "limit", 2000, 20000) or 1
+    chats = list(store.chats.values())
+    if p.get("as"):
+        user = _user(store, p["as"])
+        chats = [c for c in chats if user in c.members]
+    heap = []
+    for chat in chats:
+        n = len(chat.times)
+        times, seqs = chat.times, chat.messages
+        i = bisect.bisect_left(times, cursor[0], 0, n)
+        while i < n and (times[i], chat.id, seqs[i]) <= cursor:
+            i += 1
+        if i < n:
+            heap.append((times[i], chat.id, seqs[i], i, n, chat))
+    heapq.heapify(heap)
+    out = []
+    while heap and len(out) < limit:
+        t, chat_id, seq, i, n, chat = heap[0]
+        out.append([t, chat_id, seq, chat.senders[i]])
+        if i + 1 < n:
+            heapq.heapreplace(heap, (chat.times[i + 1], chat_id, chat.messages[i + 1], i + 1, n, chat))
+        else:
+            heapq.heappop(heap)
+    return {"messages": out, "more": bool(heap)}
+
+
 # ---------------------------------------------------------------------- as one agent
 
 def view_as(store: Store, p: dict) -> dict:
@@ -793,7 +889,7 @@ def view_page(store: Store, p: dict) -> dict:
 
 METHODS = {f.__name__: f for f in (
     view_info, view_snapshot, view_messages, view_thread, view_receipts, view_posts, view_search, view_activity,
-    view_as, view_knew, view_text, view_page)}
+    view_at, view_replay, view_as, view_knew, view_text, view_page)}
 
 
 # ---------------------------------------------------------------------- the page

@@ -20,7 +20,15 @@ const ms = at => typeof at === 'number' ? at * 1000 : Date.parse(at);
 const pad = n => String(n).padStart(2, '0');
 const clock = at => { const d = new Date(ms(at)); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const clockS = at => { const d = new Date(ms(at)); return `${clock(at)}:${pad(d.getSeconds())}`; };
-const full = at => new Date(ms(at)).toLocaleString(undefined, {dateStyle: 'medium', timeStyle: 'medium'});
+const FULL = new Map();
+const full = at => {  // a time in words, for tooltips. Making one is slow, and a page shows the same ones again and again.
+  let s = FULL.get(at);
+  if (s == null) {
+    if (FULL.size > 5000) FULL.clear();
+    FULL.set(at, s = new Date(ms(at)).toLocaleString(undefined, {dateStyle: 'medium', timeStyle: 'medium'}));
+  }
+  return s;
+};
 const dayOf = at => new Date(ms(at)).toDateString();
 const dayName = at => {
   const d = new Date(ms(at)), now = new Date();
@@ -36,12 +44,38 @@ function ago(at, ref = Date.now()) {
   return new Date(ms(at)).toLocaleDateString(undefined, {month: 'short', day: 'numeric', year: 'numeric'});
 }
 const bytes = n => n < 1000 ? `${n} B` : n < 1e6 ? `${(n / 1e3).toFixed(1)} KB` : n < 1e9 ? `${(n / 1e6).toFixed(1)} MB` : `${(n / 1e9).toFixed(1)} GB`;
+const natural = (a, b) => String(a).localeCompare(String(b), undefined, {numeric: true});
+const iso = t => new Date(Math.round(t * 1000)).toISOString();  // seconds since 1970, as the server writes times
+const isoAfter = t => new Date(Math.round(t * 1000) + 1).toISOString();  // a bound that still lets in what was at t
+const span = s => {  // a stretch of time as a clock shows it: 4:05, or 1:02:03
+  s = Math.max(0, Math.floor(s));
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
+  return h ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`;
+};
 function hashHue(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return (h >>> 0) % 360; }
-const userColor = id => `hsl(${hashHue(id)} 62% 68%)`;
+// Each agent's own colour, on its avatar, its place on the map and its messages in flight. A team of up to eight has
+// eight colours made to be told apart, given in the order of their ids, so a1 to a8 always look the same. A larger
+// swarm takes a hue from each id, all at one lightness, so white initials read on every one.
+const IDENTITY = ['#e8492a', '#3b5bdb', '#2f9e44', '#7048e8', '#d97706', '#1098ad', '#d6336c', '#9c36b5'];
+let RANK = null;  // id -> its place in IDENTITY. Worked out again when people change.
+function userColor(id) {
+  if (!RANK) {
+    const ids = [...S.users.keys()].sort(natural);
+    RANK = new Map(ids.length <= IDENTITY.length ? ids.map((u, i) => [u, i]) : []);
+  }
+  const i = RANK.get(id);
+  return i != null ? IDENTITY[i] : `oklch(0.58 0.14 ${hashHue(id)})`;
+}
 function initials(name) {
   const w = String(name).replace(/[^\p{L}\p{N} ]/gu, ' ').trim().split(/\s+/).filter(Boolean);
   return ((w[0] || '?')[0] + (w.length > 1 ? w[w.length - 1][0] : (w[0] || '')[1] || '')).toUpperCase();
 }
+// The page's shape follows the screen. A phone shows one screen at a time, a finger gets bigger rows than a mouse, and
+// with nothing to hover with, a tap on a message shows what the mouse shows over it.
+const PHONE = matchMedia('(max-width: 699px)');
+const COARSE = matchMedia('(pointer: coarse)');
+const HOVERLESS = matchMedia('(hover: none)');
+
 function throttle(fn, wait) {
   let last = 0, t = null;
   return () => {
@@ -148,7 +182,7 @@ async function loadSnapshot() {
   const t = performance.now();
   const r = await api('view_snapshot');
   S.server = r.server; S.feed = r.feed;
-  S.users = new Map(r.users.map(u => [u.id, u]));
+  S.users = new Map(r.users.map(u => [u.id, u])); RANK = null;
   S.chats = new Map(); S.total = 0; S.sent = new Map(); S.last = new Map();
   for (const c of r.chats) {
     addChat(c);
@@ -160,7 +194,7 @@ async function loadSnapshot() {
 
 // ---------------------------------------------------------------------- the address bar holds where you are
 
-const KEYS = ['layout', 'chat', 'm', 'had', 'thread', 'knew', 'as', 'person', 'q', 'unread', 'post', 'sort'];
+const KEYS = ['layout', 'chat', 'm', 'had', 'thread', 'knew', 'as', 'person', 'q', 'unread', 'post', 'sort', 'all'];
 function readRoute() {
   const p = new URLSearchParams(location.hash.slice(1));
   const r = {};
@@ -169,17 +203,32 @@ function readRoute() {
   return r;
 }
 // Goes somewhere. Keys set to null are dropped. Without keep, only the layout and the agent seen as come along.
-function go(changes, keep = false) {
+function hashOf(changes, keep = false) {
   const base = keep ? {...S.route} : {layout: S.route.layout, as: S.route.as};
   const r = {...base, ...changes};
   const p = new URLSearchParams();
   for (const k of KEYS) if (r[k] != null && r[k] !== '') p.set(k, r[k]);
-  const hash = '#' + p.toString();
-  if (location.hash !== hash) location.hash = hash; else route();
+  return '#' + p.toString();
+}
+function go(changes, keep = false) {
+  const hash = hashOf(changes, keep);
+  if (location.hash !== hash) { S.from = location.hash; location.hash = hash; } else route();
+}
+// Goes back as the browser's back button does, when the place before was in this page and, if `changes` are given,
+// is the place they lead to. Otherwise goes to `changes`. Each place keeps the one it came from in history.state.
+function back(changes, keep = false) {
+  const prev = history.state && history.state.from;
+  if (prev != null && (!changes || prev === hashOf(changes, keep))) return history.back();
+  go(changes || {}, keep);
+}
+// Whether a phone shows a screen of its own, with a way back, rather than a layout's first screen
+function opened(r) {
+  return r.layout !== 'map' && !!(r.chat || r.person || r.q || r.unread || r.post || (r.layout === 'chat' && r.all));
 }
 
 function viewKey(r) {
   if (r.layout === 'map') return 'map';
+  if (r.layout === 'chat' && PHONE.matches && !opened(r)) return 'home';
   if (r.q) return `q|${r.q}|${r.as}`;
   if (r.person) return `person|${r.person}`;
   if (r.unread && r.as) return `unread|${r.as}`;
@@ -188,19 +237,28 @@ function viewKey(r) {
 }
 
 async function route() {
+  if (S.from != null) { history.replaceState({from: S.from}, ''); S.from = null; }
   const prev = S.route;
   S.route = readRoute();
-  const r = S.route;
-  document.body.className = 'layout-' + r.layout;
-  if (r.as !== prev.as) await loadAs();
+  const r = S.route, body = document.body, deep = opened(r), was = body.classList.contains('opened');
+  const hide = PHONE.matches && deep && !was, show = PHONE.matches && was && !deep;
+  if (hide) side.top = side.list ? side.list.scrollTop : 0;  // a phone's list keeps its place under an opened screen
+  for (const l of ['chat', 'board', 'map']) body.classList.toggle('layout-' + l, l === r.layout);
+  body.classList.toggle('opened', deep);
+  body.classList.toggle('picked', r.layout === 'map' && !!(r.chat || r.person));
+  if (show && side.list) side.list.scrollTop = side.top || 0;
+  if (replay.on && r.layout === 'board') await replay.exit(false);  // a board is only shown live
+  if (r.as !== prev.as) await (replay.on ? replay.reload() : loadAs());
   const key = viewKey(r);
   if (r.as !== prev.as && key === S.viewKey && S.view && S.view.onAs) S.view.onAs();
+  if (key === S.viewKey && S.view && S.view.onRoute) S.view.onRoute();
   if (key !== S.viewKey) {
     if (S.view && S.view.destroy) S.view.destroy();
     S.viewKey = key;
     const main = $('#main');
     main.replaceChildren();
     S.view = r.layout === 'map' ? new MapView(main)
+      : key === 'home' ? new HomeView()
       : r.q ? new SearchView(main, r.q)
       : r.person ? new PersonView(main, r.person)
       : r.unread && r.as ? new UnreadView(main)
@@ -218,6 +276,7 @@ async function route() {
   }
   renderTop();
   side.build();
+  replay.show();
 }
 
 // ---------------------------------------------------------------------- seeing as one agent
@@ -248,15 +307,17 @@ const refreshAs = throttle(async () => {
 function renderTop() {
   const r = S.route;
   for (const b of $$('#layouts button')) b.classList.toggle('on', b.dataset.layout === r.layout);
+  for (const b of $$('#tabbar button')) b.classList.toggle('on', b.dataset.nav === (r.layout === 'chat' ? S.tab : r.layout));
   const agents = [...S.users.values()].filter(u => !u.removed).length;
   const now = Date.now();
   S.rate = S.rate.filter(t => now - t < 10000);
-  const rate = S.rate.length / Math.max(1, Math.min(10, (now - S.since) / 1000));
-  $('#stats').innerHTML = html`<b>${num(agents)}</b> agents · <b>${num(S.chats.size)}</b> chats · <b>${num(S.total)}</b> messages${rate ? html` · <b>${rate < 10 ? rate.toFixed(1) : Math.round(rate)}</b>/s` : ''}`;
+  const rate = replay.on ? 0 : S.rate.length / Math.max(1, Math.min(10, (now - S.since) / 1000));
+  const chats = replay.on ? [...S.chats.values()].filter(c => c.born).length : S.chats.size;
+  $('#stats').innerHTML = html`<b>${num(agents)}</b> agents · <b>${num(chats)}</b> chats · <b>${num(S.total)}</b> messages${replay.on ? ' so far' : ''}${rate ? html` · <b>${rate < 10 ? rate.toFixed(1) : Math.round(rate)}</b>/s` : ''}`;
   const as = $('#as');
   as.classList.toggle('on', !!r.as);
-  as.innerHTML = r.as ? html`${avatar(r.as, 'sm')}<span>As <b>${name(r.as)}</b></span><span class="x" data-clear-as title="See everything again">×</span>`
-    : html`<span>As everyone</span><span>▾</span>`;
+  as.innerHTML = r.as ? html`${avatar(r.as, 'sm')}<span><span class="pre">As </span><b>${name(r.as)}</b></span><span class="x" data-clear-as title="See everything again">×</span>`
+    : html`<span><span class="pre">As </span><span class="who">everyone</span></span><span>▾</span>`;
 }
 setInterval(() => renderTop(), 2000);
 
@@ -265,9 +326,9 @@ function setLive(state) {
   S.liveState = state;
   const el = $('#live');
   el.className = 'live ' + state;
-  el.textContent = {on: 'Live', ro: 'Read-only', off: 'Offline'}[state] || '';
+  el.textContent = {on: 'Live', ro: 'Read-only', off: 'Offline', rp: 'Replay'}[state] || '';
   el.title = {on: 'Following every chat as it happens', ro: `No server is running on ${S.server.data}: this is the folder as it was on disk`,
-    off: 'Lost the server. Trying again.'}[state] || '';
+    off: 'Lost the server. Trying again.', rp: 'Showing the run as it stood at the moment on the bar below'}[state] || '';
 }
 
 function avatar(id, size = '') {
@@ -296,6 +357,7 @@ const side = {
     });
   },
   build() {
+    this.h = COARSE.matches ? 44 : 30;  // as tall as .row in the stylesheet
     for (const b of $$('#tabs button')) b.classList.toggle('on', b.dataset.tab === S.tab);
     $('#filter').placeholder = S.tab === 'people' ? 'Filter people' : 'Filter chats';
     this.rows = S.tab === 'people' ? peopleRows() : chatRows();
@@ -318,13 +380,16 @@ function chatRows() {
   const special = (label, icon, on, open, n) => ({open, html: i => html`<div class="row special${on ? ' on' : ''}" data-i="${i}"><span class="ico">${icon}</span><span class="t">${label}</span>${n ? html`<span class="badge">${num(n)}</span>` : ''}</div>`.s});
   if (!f) {
     if (r.layout === 'board') rows.push(special('Front page', '★', !r.chat && !r.post && !r.q && !r.person && !r.unread, () => go({chat: null})));
-    else rows.push(special('All activity', '≋', !r.chat && !r.q && !r.person && !r.unread, () => go({chat: null})));
-    if (r.as && S.as) rows.push(special(`${first(r.as)}'s unread`, '✉', !!r.unread, () => go({unread: 1}),
+    else rows.push(special('All activity', '≋', !r.chat && !r.q && !r.person && !r.unread, () => go({all: 1})));
+    if (r.as && S.as && !replay.on) rows.push(special(`${first(r.as)}'s unread`, '✉', !!r.unread, () => go({unread: 1}),
       S.as.order.reduce((n, id) => n + (S.as.chats.get(id).unread || 0), 0)));
   }
   let chats;
   if (r.as && S.as) chats = S.as.order.map(id => S.chats.get(id)).filter(Boolean);
-  else chats = [...S.chats.values()].sort((a, b) => (b.last_at > a.last_at) - (b.last_at < a.last_at));
+  else chats = [...S.chats.values()];
+  if (replay.on) {  // only the chats made by the moment, in the order they were made, so the list holds still
+    chats = chats.filter(c => c.born).sort((a, b) => (a.created_at > b.created_at) - (a.created_at < b.created_at));
+  } else if (!(r.as && S.as)) chats.sort((a, b) => (b.last_at > a.last_at) - (b.last_at < a.last_at));
   if (f) chats = chats.filter(c => title(c).toLowerCase().includes(f) || c.id.includes(f));
   S.busiest = chats.reduce((most, c) => Math.max(most, c.recent || 0), 1);
   const groups = [['channel', 'Channels'], ['group', 'Group chats'], ['direct', 'Direct chats']];
@@ -342,15 +407,19 @@ function chatRow(c) {
   const r = S.route;
   const mine = r.as && S.as ? S.as.chats.get(c.id) : null;
   return {
-    open: () => go({chat: c.id, layout: r.layout === 'map' ? 'chat' : r.layout}),
+    open: () => go({chat: c.id, person: null, layout: r.layout}),
     html: i => {
       const on = r.chat === c.id && !r.q && !r.person && !r.unread;
-      const unread = mine ? mine.unread : 0;
+      // in a replay, as no one: what came since this chat was last open, as in a chat app
+      const fresh = replay.on && !mine && !on ? c.messages - (replay.seen.get(c.id) ?? c.messages) : 0;
+      const unread = mine ? mine.unread : fresh;
       const badge = mine ? (mine.mentioned ? html`<span class="badge at" title="Mentioned">@${unread}</span>` : unread ? html`<span class="badge${mine.notify !== 'all' ? ' mute' : ''}" title="Unread for ${name(r.as)}${mine.notify !== 'all' ? `, notify ${mine.notify}` : ''}">${num(unread)}</span>` : '')
-        : html`<span class="n" title="Messages">${num(c.messages)}</span>`;
-      const busy = c.recent ? Math.max(8, Math.round(100 * Math.sqrt(c.recent / S.busiest))) : 0;
-      return html`<div class="row${on ? ' on' : ''}${unread ? ' unread' : ''}" data-i="${i}" title="${title(c)}${c.public ? ' (public)' : ''}${c.archived ? ' (archived)' : ''}${c.description ? '\n' + c.description : ''}
-${num(c.recent || 0)} messages in the last 15 minutes"><span class="ico ${c.kind}">${KIND[c.kind]}</span><span class="t">${c.name || title(c)}</span>${busy ? html`<span class="busy"><i style="width:${busy}%"></i></span>` : ''}${badge}</div>`.s;
+        : fresh > 0 ? html`<span class="badge" title="New since you last opened it">${num(fresh)}</span>`
+        : replay.on ? '' : html`<span class="n" title="Messages">${num(c.messages)}</span>`;
+      const busy = !replay.on && c.recent ? Math.max(8, Math.round(100 * Math.sqrt(c.recent / S.busiest))) : 0;
+      const other = c.kind === 'direct' ? c.members.find(u => u !== r.as) || c.members[0] : null;
+      return html`<div class="row${on ? ' on' : ''}${unread ? ' unread' : ''}${replay.on && !c.messages ? ' quiet' : ''}" data-i="${i}" title="${title(c)}${c.public ? ' (public)' : ''}${c.archived ? ' (archived)' : ''}${c.description ? '\n' + c.description : ''}
+${replay.on ? plural(c.messages, 'message') + ' so far' : num(c.recent || 0) + ' messages in the last 15 minutes'}">${other ? avatar(other, 'xs') : html`<span class="ico ${c.kind}">${KIND[c.kind]}</span>`}<span class="t">${c.name || title(c)}</span>${busy ? html`<span class="busy"><i style="width:${busy}%"></i></span>` : ''}${badge}</div>`.s;
     },
   };
 }
@@ -363,7 +432,7 @@ function peopleRows() {
   const rows = [{open() {}, html: () => html`<div class="row head">People · ${num(people.length)}</div>`.s}];
   for (const u of people) {
     rows.push({
-      open: () => go({person: u.id, layout: r.layout === 'map' ? 'chat' : r.layout}),
+      open: () => go({person: u.id, chat: null, layout: r.layout}),
       html: i => {
         const role = Object.values(u.fields || {})[0];
         const last = S.last.get(u.id);
@@ -962,8 +1031,8 @@ function messageHtml(m, prev, o = {}) {
   const long = !o.whole && (text.length > 1500 || text.split('\n').length > 18);
   const reactions = Object.entries(m.reactions || {});
   const depth = o.tree ? Math.min(m.depth || 0, 12) : 0;
-  return html`<div class="msg${cont ? ' cont' : ''}${mentionsMe ? ' mentions-me' : ''}" data-seq="${m.seq}" data-chat="${m.chat}" data-id="${m.id}" data-time="${clock(m.at)}"${o.tree ? html` style="--d:${depth}"` : ''}>
-${avatar(m.from)}<div class="body"><div class="head"><span class="name" data-person="${m.from}">${u.name}</span>${u.name !== m.from ? html`<span class="uid">${m.from}</span>` : ''}<time title="${full(m.at)}">${o.tree || o.showChat ? ago(m.at) : clock(m.at)}</time>${o.showChat ? html`<span class="chat" data-open="${m.chat}" data-at="${m.seq}">in ${chatTitle(m.chat)}</span>` : ''}${m.edited_at ? html`<span class="edited" title="Edited ${full(m.edited_at)}">(edited)</span>` : ''}</div>
+  return html`<div class="msg${cont ? ' cont' : ''}${mentionsMe ? ' mentions-me' : ''}" data-seq="${m.seq}" data-chat="${m.chat}" data-id="${m.id}" data-time="${replay.on ? span(ms(m.at) / 1000 - replay.act.start) : clock(m.at)}"${o.tree ? html` style="--d:${depth}"` : ''}>
+${avatar(m.from)}<div class="body"><div class="head"><span class="name" data-person="${m.from}">${u.name}</span>${u.name !== m.from ? html`<span class="uid">${m.from}</span>` : ''}<time title="${full(m.at)}">${replay.on ? span(ms(m.at) / 1000 - replay.act.start) : o.tree || o.showChat ? ago(m.at) : clock(m.at)}</time>${o.showChat ? html`<span class="chat" data-open="${m.chat}" data-at="${m.seq}">in ${chatTitle(m.chat)}</span>` : ''}${m.edited_at ? html`<span class="edited" title="Edited ${full(m.edited_at)}">(edited)</span>` : ''}</div>
 ${m.parent && !o.tree ? html`<div class="quote" data-jump="${m.parent.seq}" data-chat="${m.chat}" title="Go to the message it answers"><b>${name(m.parent.from)}</b><span>${m.parent.deleted ? 'deleted message' : m.parent.text || (m.parent.files ? 'a file' : '')}</span></div>` : ''}
 ${m.deleted ? html`<div class="text deleted">This message was deleted.</div>` : html`<div class="text${long ? ' long' : ''}">${rich(text, o.mark)}</div>${long ? html`<span class="more" data-more>Show all</span>` : ''}`}
 ${filesHtml(m.attachments)}
@@ -990,15 +1059,23 @@ function systemHtml(e) {
     archived: () => html`${who} archived it`,
     unarchived: () => html`${who} unarchived it`,
   }[e.kind];
-  return html`<div class="sys" data-seq="${e.seq}"><span>${what ? what() : e.kind}</span><span class="stamp" title="${full(e.at)}">${clock(e.at)}</span></div>`;
+  return html`<div class="sys" data-seq="${e.seq}"><span>${what ? what() : e.kind}</span><span class="stamp" title="${full(e.at)}">${replay.on ? span(Math.max(0, ms(e.at) / 1000 - replay.act.start)) : clock(e.at)}</span></div>`;
 }
 
 // ---------------------------------------------------------------------- one chat
 
+// A replay shows only what was written by its moment. Messages from a server, cut at that moment, with whether any were.
+function upToNow(list) {
+  if (!replay.on) return [list, false];
+  const kept = list.filter(m => ms(m.at) <= Math.round(replay.t * 1000));
+  return [kept, kept.length < list.length];
+}
+
 class ChatView {
   constructor(main, chatId, o) {
     this.id = chatId; this.o = o; this.msgs = []; this.first = this.last = false; this.positions = {}; this.fresh = 0;
-    this.main = main;
+    this.main = main; this.ahead = []; this.want = 0;  // in a replay: fetched but not reached yet, and the newest reached
+    if (replay.on) replay.seen.set(chatId, S.chats.get(chatId)?.messages || 0);
     const c = S.chats.get(chatId);
     main.innerHTML = html`<div class="mhead"></div><div class="banners"></div><div class="scroll"><div class="loading top" hidden>Loading earlier messages</div><div class="msgs"></div><div class="loading bottom" hidden>Loading</div></div><button class="newpill" hidden></button>`;
     this.head = $('.mhead', main); this.scroll = $('.scroll', main); this.box = $('.msgs', main); this.pill = $('.newpill', main);
@@ -1012,22 +1089,27 @@ class ChatView {
     const c = S.chats.get(this.id), r = S.route;
     if (!c) return;
     const kind = c.kind === 'channel' ? (c.public ? 'public' : 'private') : c.kind;
+    const made = replay.on ? `at ${span(ms(c.created_at) / 1000 - replay.act.start)}` : ago(c.created_at);
     this.head.innerHTML = html`<span class="ico ${c.kind}">${KIND[c.kind]}</span><h1 title="${title(c, null)}">${c.name ? '#' + c.name : title(c, null)}</h1><span class="pill ${kind}">${kind}</span>
 ${c.archived ? html`<span class="pill archived">archived</span>` : ''}
-<span class="sub"><span class="link" data-members="${c.id}">${plural(c.members.length, 'member')}</span> · ${plural(c.messages, 'message')} · made by ${name(c.created_by)} ${ago(c.created_at)}</span>
-<div class="grow"></div><button class="btn" data-goto="board">Open as a board</button>
-${c.description ? html`<div class="about" title="${c.description}">${c.description}</div>` : ''}`;
+<span class="sub"><span class="link" data-members="${c.id}">${plural(c.members.length, 'member')}</span> · ${plural(c.messages, 'message')}${replay.on ? ' so far' : ''}${this.o.inPane ? '' : ` · made by ${name(c.created_by)} ${made}`}</span>
+<div class="grow"></div>${this.o.inPane ? html`<button class="btn" data-open="${c.id}" title="Open this chat on its own">Open</button>` : html`<button class="btn" data-goto="board">Open as a board</button>`}
+${c.description && !this.o.inPane ? html`<div class="about" title="${c.description}">${c.description}</div>` : ''}`;
     const banners = $('.banners', this.main);
     const notIn = r.as && !c.members.includes(r.as);
     banners.innerHTML = notIn ? html`<div class="banner">${name(r.as)} is not in this chat, so ${first(r.as)} cannot see any of it.</div>` : '';
   }
   async load(params) {
-    const o = this.o, as = S.route.as, c = S.chats.get(this.id);
+    const o = this.o, as = S.route.as, c = S.chats.get(this.id), gen = replay.gen;
     const pos = as && S.as && S.as.positions[this.id];
-    const start = o.jump ? {around: o.jump} : o.had === 0 ? {after: 0} : pos != null && c.last && pos < c.last.seq ? {around: pos + 1} : {};
+    const start = o.jump ? {around: o.jump} : o.had === 0 ? {after: 0} : replay.on ? {at: replay.t}
+      : pos != null && c.last && pos < c.last.seq ? {around: pos + 1} : {};
     const r = await api('view_messages', params || {chat: this.id, limit: 150, ...start});
-    if (this.dead) return;
-    this.msgs = r.messages; this.first = r.first; this.last = r.last; this.positions = r.positions;
+    if (this.dead || gen !== replay.gen) return;
+    const [msgs, cut] = upToNow(r.messages);
+    this.msgs = msgs; this.first = r.first; this.last = r.last || cut || (replay.on && !params && !o.jump && o.had !== 0);
+    this.positions = r.positions;
+    if (replay.on) this.want = msgs.length ? msgs[msgs.length - 1].seq : 0;
     this.draw();
     const d = this.divider();
     if (o.had === 0 && !params) this.scroll.scrollTop = 0;
@@ -1104,8 +1186,10 @@ ${c.description ? html`<div class="about" title="${c.description}">${c.descripti
       const r = await api('view_messages', {chat: this.id, after: this.msgs[this.msgs.length - 1].seq, limit: 200});
       if (this.dead) return;
       const have = new Set(this.msgs.map(m => m.seq));
-      this.msgs = [...this.msgs, ...r.messages.filter(m => !have.has(m.seq))];
-      this.last = r.last;
+      const [later, cut] = upToNow(r.messages);
+      this.msgs = [...this.msgs, ...later.filter(m => !have.has(m.seq))];
+      this.last = r.last || cut;
+      if (replay.on && this.last) this.want = Math.max(this.want, this.msgs[this.msgs.length - 1].seq);
       if (this.msgs.length > 700) {
         const h = s.scrollHeight, t = s.scrollTop;
         this.msgs = this.msgs.slice(-600); this.first = false;
@@ -1129,8 +1213,11 @@ ${c.description ? html`<div class="about" title="${c.description}">${c.descripti
     }
     for (const e of ev.reads) if (e.chat === this.id) this.positions[e.user] = Math.max(this.positions[e.user] || 0, e.upto);
     if (!mine.length || !this.last) { if (mine.length) this.pillCount(mine.length); return; }
+    this.add(mine);
+  }
+  add(list) {  // messages newer than any shown, at the bottom
     const have = new Set(this.msgs.map(m => m.seq));
-    const add = mine.filter(m => !have.has(m.seq));
+    const add = list.filter(m => !have.has(m.seq));
     if (!add.length) return;
     const stick = this.atBottom();
     const parents = new Set(add.map(m => m.parent && m.parent.seq).filter(Boolean));
@@ -1140,7 +1227,9 @@ ${c.description ? html`<div class="about" title="${c.description}">${c.descripti
     if (parents.size || this.divider()) this.draw();
     else {
       this.box.querySelector('.empty')?.remove();
+      const tail = this.box.lastElementChild;
       this.box.insertAdjacentHTML('beforeend', this.rows(add, prev));
+      if (add.length <= ARRIVING) for (let el = tail ? tail.nextElementSibling : this.box.firstElementChild; el; el = el.nextElementSibling) el.classList.add('arrive');
     }
     if (stick) {
       if (this.msgs.length > 700) { this.msgs = this.msgs.slice(-600); this.first = false; this.draw(); }
@@ -1152,11 +1241,57 @@ ${c.description ? html`<div class="about" title="${c.description}">${c.descripti
     this.pill.hidden = false;
     this.pill.textContent = `${plural(this.fresh, 'new message')} ↓`;
   }
+  // ---- a replay: each message is shown when the moment passes it. The next ones are fetched a page ahead.
+  onReplay(list) {
+    let top = 0;
+    for (const m of list) if (m[1] === this.id) top = m[2];
+    if (!top) return;
+    this.want = Math.max(this.want, top);
+    replay.seen.set(this.id, S.chats.get(this.id).messages);
+    this.renderHeadSoon();
+    if (this.last) this.pull(); else this.pillCount(list.filter(m => m[1] === this.id).length);
+  }
+  renderHeadSoon = throttle(() => { if (!this.dead) this.renderHead(); }, 500);
+  async pull() {
+    if (this.pulling) return;
+    this.pulling = true;
+    const gen = replay.gen;
+    try {
+      while (!this.dead && gen === replay.gen) {
+        const shown = this.msgs.length ? this.msgs[this.msgs.length - 1].seq : 0;
+        if (shown >= this.want) break;
+        const ready = this.ahead.filter(m => m.seq <= this.want);
+        const known = this.ahead.length ? this.ahead[this.ahead.length - 1].seq : shown;
+        if (known < this.want && !this.aheadEnd) {
+          const r = await api('view_messages', {chat: this.id, after: known, limit: 100});
+          if (this.dead || gen !== replay.gen) return;
+          this.ahead.push(...r.messages.filter(m => m.seq > known));
+          this.aheadEnd = r.last;
+          continue;
+        }
+        this.ahead = this.ahead.filter(m => m.seq > this.want);
+        if (ready.length) this.add(ready); else break;
+      }
+    } finally { this.pulling = false; }
+  }
+  onSeek() {  // the replay moved: start again from its new moment
+    this.ahead = []; this.aheadEnd = false; this.want = 0; this.o.jump = null; this.fresh = 0; this.pill.hidden = true;
+    replay.seen.set(this.id, S.chats.get(this.id)?.messages || 0);
+    this.renderHead();
+    this.load();
+  }
   onAs() { this.renderHead(); this.draw(); }
   destroy() { this.dead = true; }
 }
 
+// A phone's first screen in the chat layout is the list itself, and nothing is drawn behind it.
+class HomeView { onSeek() {} }
+
 // ---------------------------------------------------------------------- lists of messages from many chats
+
+// A few new messages fade in as they arrive. A larger batch, as a fast replay brings every fifth of a second, just
+// appears: faded in together, every message on screen would be mid-fade all the time.
+const ARRIVING = 4;
 
 class ListView {
   constructor(main, heading) {
@@ -1173,24 +1308,32 @@ class ListView {
 }
 
 class ActivityView extends ListView {
-  constructor(main) {
-    const as = S.route.as;
-    super(main, html`<span class="ico">≋</span><h1>All activity</h1><span class="sub">${as ? `in ${name(as)}'s chats, ` : 'every chat, '}newest at the bottom, live</span>`);
-    this.none = 'No messages yet. New ones appear here as they are written.';
+  constructor(main, o = {}) {
+    super(main, html`<span class="ico">≋</span><h1>All activity</h1><span class="sub"></span>`);
+    this.o = o;
     this.load();
+  }
+  heading() {
+    const as = S.route.as;
+    $('.sub', this.main).textContent = `${as ? `in ${name(as)}'s chats, ` : this.o.inPane ? '' : 'every chat, '}newest at the bottom${replay.on ? ', as the replay reaches them' : ', live'}`;
+    this.none = replay.on ? 'No messages yet at this moment of the run.' : 'No messages yet. New ones appear here as they are written.';
   }
   async load() {
     this.wait.hidden = false;
-    const r = await api('view_search', {limit: 150, as: S.route.as || undefined});
-    if (this.dead) return;
+    this.heading();
+    const gen = replay.gen;
+    const r = await api('view_search', {limit: 150, as: S.route.as || undefined, before: replay.on ? isoAfter(replay.t) : undefined});
+    if (this.dead || gen !== replay.gen) return;
     this.wait.hidden = true;
     this.msgs = r.messages.reverse();
     this.draw();
     this.scroll.scrollTop = this.scroll.scrollHeight;
   }
-  onEvents(ev) {
-    let add = ev.lines.filter(m => m.kind === 'message');
+  onEvents(ev) { this.append(ev.lines.filter(m => m.kind === 'message')); }
+  append(add) {
     if (S.route.as) add = add.filter(m => (S.chats.get(m.chat)?.members || []).includes(S.route.as));
+    const have = new Set(this.msgs.slice(-300).map(m => m.id));
+    add = add.filter(m => !have.has(m.id));
     if (!add.length) return;
     const stick = this.scroll.scrollHeight - this.scroll.scrollTop - this.scroll.clientHeight < 80;
     const prev = this.msgs[this.msgs.length - 1];
@@ -1199,23 +1342,42 @@ class ActivityView extends ListView {
     else {
       this.box.querySelector('.empty')?.remove();
       let p = prev, out = '';
-      for (const m of add) { out += messageHtml(m, p, {showChat: true}).s; p = m; }
+      for (const m of add) { const h = messageHtml(m, p, {showChat: true}).s; out += add.length <= ARRIVING ? h.replace('<div class="msg', '<div class="arrive msg') : h; p = m; }
       this.box.insertAdjacentHTML('beforeend', out);
     }
     if (stick) this.scroll.scrollTop = this.scroll.scrollHeight;
   }
+  // A replay: the newest messages up to the moment, a few times a second. A burst larger than a page shows its newest.
+  onReplay(list) {
+    if (S.route.as) list = list.filter(m => (S.chats.get(m[1])?.members || []).includes(S.route.as));
+    if (list.length) this.pullSoon();
+  }
+  pullSoon = throttle(() => this.pull(), 200);
+  async pull() {  // one at a time: on a slow server, asking again before the answer only makes a queue
+    if (this.dead || !replay.on) return;
+    if (this.pulling) { this.again = true; return; }
+    this.pulling = true; this.again = false;
+    const gen = replay.gen, last = this.msgs[this.msgs.length - 1];
+    try {
+      const r = await api('view_search', {limit: 100, as: S.route.as || undefined, before: isoAfter(replay.t), after: last ? last.at : undefined});
+      if (!this.dead && gen === replay.gen) this.append(r.messages.reverse());
+    } finally { this.pulling = false; }
+    if (this.again) this.pullSoon();
+  }
+  onSeek() { this.load(); }
 }
 
 class UnreadView extends ListView {
   constructor(main) {
     const as = S.route.as;
     super(main, html`<span class="ico">✉</span><h1>What ${name(as)} would read now</h1><span class="sub">exactly what <code>swarmchat read</code> would hand ${first(as)}, oldest first. Nothing is marked read.</span>`);
-    this.none = `Nothing unread: ${first(as)} has read everything.`;
+    this.none = replay.on ? `A replay does not rebuild this list. The number on each of ${first(as)}'s chats is what ${first(as)} had not read at this moment.`
+      : `Nothing unread: ${first(as)} has read everything.`;
     this.flat = true;
     this.draw2();
   }
   draw2() {
-    this.msgs = S.as ? S.as.unread : [];
+    this.msgs = S.as && !replay.on ? S.as.unread : [];
     this.draw();
     if (S.as && S.as.unreadLeft > this.msgs.length) this.box.insertAdjacentHTML('beforeend', html`<div class="note">${num(S.as.unreadLeft - this.msgs.length)} more after these.</div>`.s);
   }
@@ -1266,7 +1428,7 @@ class SearchView extends ListView {
     this.wait.hidden = false;
     const t = performance.now();
     const r = await api('view_search', {text: p.text, from: p.from, mentions: p.mentions, chats: p.chats, files: p.files,
-      after: p.after, before: p.before, as: S.route.as || undefined, limit: 100, until});
+      after: p.after, before: replay.on && !(p.before < isoAfter(replay.t)) ? isoAfter(replay.t) : p.before, as: S.route.as || undefined, limit: 100, until});
     if (this.dead) return;
     this.wait.hidden = true;
     this.msgs = until ? [...this.msgs, ...r.messages] : r.messages;
@@ -1301,7 +1463,7 @@ ${fields.length ? html`<div class="fields">${fields.map(([k, v]) => html`<span c
     this.load();
   }
   async load() {
-    const r = await api('view_search', {from: [this.id], limit: 40});
+    const r = await api('view_search', {from: [this.id], limit: 40, before: replay.on ? isoAfter(replay.t) : undefined});
     if (this.dead) return;
     let prev = null, out = '';
     for (const m of r.messages) { out += messageHtml(m, prev, {showChat: true, flat: true}).s; prev = m; }
@@ -1424,7 +1586,7 @@ class ThreadPane {
       if (this.dead) return;
       this.chat = r.chat;
       $('#pane h2').textContent = `Thread in ${chatTitle(r.chat)}`;
-      this.box.innerHTML = treeHtml(r.messages).s;
+      this.box.innerHTML = treeHtml(upToNow(r.messages)[0]).s;
       const me = this.box.querySelector(`.msg[data-id="${CSS.escape(this.id)}"]`);
       if (me && me !== this.box.firstElementChild) { me.scrollIntoView({block: 'center'}); me.classList.add('flash'); }
     } catch (e) { this.box.innerHTML = html`<div class="note">${e.message}</div>`.s; }
@@ -1485,7 +1647,7 @@ const overlay = {
 function openSearch(initial = '') {
   const box = document.createElement('div');
   box.className = 'palette';
-  box.innerHTML = html`<input placeholder="Search messages, people and chats" spellcheck="false"><div class="res"></div><div class="hint">Enter searches every message. Narrow it with <code>from:alice</code> <code>in:#ops</code> <code>mentions:bob</code> <code>has:file</code> <code>after:2026-10-01</code> <code>before:…</code></div>`.s;
+  box.innerHTML = html`<div class="pq"><input placeholder="Search messages, people and chats" spellcheck="false"><button class="cancel" data-dismiss>Cancel</button></div><div class="res"></div><div class="hint">Enter searches every message. Narrow it with <code>from:alice</code> <code>in:#ops</code> <code>mentions:bob</code> <code>has:file</code> <code>after:2026-10-01</code> <code>before:…</code></div>`.s;
   overlay.open(box);
   const input = $('input', box), res = $('.res', box);
   let items = [], sel = 0;
@@ -1582,8 +1744,10 @@ function toast(text) {
 
 async function follow() {
   for (;;) {
+    if (replay.on) { await replay.ended; continue; }  // a replay has the page. Its end takes a new snapshot.
     try {
       const r = await api('view_feed', {after: S.feed, feed_id: S.server.feed_id, timeout: 25});
+      if (replay.on) continue;
       setLive(S.server.read_only ? 'ro' : 'on');
       if (r.reset) {
         await loadSnapshot();
@@ -1595,7 +1759,7 @@ async function follow() {
       if (r.events.length) { apply(r.events); await sleep(100); }
     } catch (e) {
       if (e.status === 401) return login('The token was refused. It may have changed.');
-      setLive('off');
+      if (!replay.on) setLive('off');
       await sleep(2000);
     }
   }
@@ -1606,7 +1770,7 @@ function apply(events) {
   let asTouched = false;
   const as = S.route.as;
   for (const e of events) {
-    if (e.kind === 'user') { S.users.set(e.user.id, e.user); ev.users = true; continue; }
+    if (e.kind === 'user') { if (!S.users.has(e.user.id)) RANK = null; S.users.set(e.user.id, e.user); ev.users = true; continue; }
     if (e.kind === 'chat') {
       addChat(e.summary);
       ev.chats.add(e.chat);
@@ -1631,6 +1795,7 @@ function apply(events) {
         const t = ms(m.at) / 1000;  // seconds, as the snapshot gives them
         if (!(S.last.get(m.from) >= t)) S.last.set(m.from, t);
         S.rate.push(Date.now());
+        replay.bump(t);
       }
       ev.lines.push(m);
       ev.chats.add(e.chat);
@@ -1653,6 +1818,15 @@ function onClick(e) {
   const t = e.target;
   const hit = sel => t.closest(sel);
   let el;
+  if (hit('#back')) return back();
+  if ((el = hit('[data-nav]'))) {
+    const nav = el.dataset.nav;
+    if (nav === 'search') return openSearch();
+    if (nav === 'chats' || nav === 'people') { S.tab = nav; return go({layout: 'chat'}); }
+    return go({layout: nav});
+  }
+  if (hit('[data-dismiss]')) return overlay.close();
+  if (hit('[data-unpick]')) return go({chat: null, person: null});
   if ((el = hit('[data-layout]'))) {
     const layout = el.dataset.layout, r = S.route;
     return go({layout, chat: r.chat, as: r.as, person: layout === 'map' ? null : r.person, q: layout === 'map' ? null : r.q});
@@ -1660,24 +1834,27 @@ function onClick(e) {
   if (hit('[data-clear-as]')) { e.stopPropagation(); return go({as: null}, true); }
   if ((el = hit('#as'))) return openAsPicker(el);
   if (hit('#find')) return openSearch();
+  if (hit('#replay')) return replay.enter();
   if (hit('#theme')) return setTheme(THEMES[theme()].next);
   if (hit('[data-home]')) { e.preventDefault(); return go({layout: S.route.layout, as: S.route.as, thread: null, knew: null}); }
   if ((el = hit('[data-see-as]'))) return go({as: el.dataset.seeAs, person: null});
   if ((el = hit('[data-file]'))) return download(el.dataset.file, el.dataset.name);
   if ((el = hit('[data-image]'))) return openPicture(el.dataset);
   if ((el = hit('[data-text]'))) return openText(el.dataset.text);
-  if ((el = hit('[data-thread]'))) return go({thread: el.dataset.thread, knew: null}, true);
-  if ((el = hit('[data-knew]'))) return go({knew: el.dataset.knew, thread: null}, true);
+  // on the map, the pane is the map's: a thread or what a sender had read opens beside the chat instead
+  const away = S.route.layout === 'map' ? id => ({layout: 'chat', chat: id.split(':')[0], person: null}) : () => ({});
+  if ((el = hit('[data-thread]'))) return go({thread: el.dataset.thread, knew: null, ...away(el.dataset.thread)}, true);
+  if ((el = hit('[data-knew]'))) return go({knew: el.dataset.knew, thread: null, ...away(el.dataset.knew)}, true);
   if ((el = hit('[data-receipts]'))) return openReceipts(el, el.dataset.receipts);
   if ((el = hit('[data-copy]'))) { navigator.clipboard?.writeText(el.dataset.copy); return toast(`Copied ${el.dataset.copy}`); }
-  if (hit('[data-close-pane]')) return go({thread: null, knew: null}, true);
+  if (hit('[data-close-pane]')) return back({thread: null, knew: null}, true);
   if ((el = hit('[data-fold]'))) return fold(el);
   if ((el = hit('[data-more]'))) { el.previousElementSibling.classList.remove('long'); return el.remove(); }
   if ((el = hit('[data-members]'))) return openMembers(el, el.dataset.members);
   if ((el = hit('[data-sort]'))) return go({sort: el.dataset.sort}, true);
   if ((el = hit('[data-board]'))) return go({layout: 'board', chat: el.dataset.board});
   if ((el = hit('[data-goto]'))) return go({layout: el.dataset.goto, chat: S.route.chat || (S.view && S.view.chat), post: null}, false);
-  if (hit('[data-back]')) return history.length > 1 ? history.back() : go({post: null}, true);
+  if (hit('[data-back]')) return back({post: null}, true);
   if (hit('[data-open-post-chat]')) return go({layout: 'chat', chat: S.view.chat, m: +S.view.id.split(':')[1]});
   if ((el = hit('[data-had]'))) return go({layout: 'chat', chat: el.dataset.had, m: el.dataset.upto || 1, had: el.dataset.upto, knew: S.route.knew});
   if ((el = hit('[data-jump]'))) {
@@ -1685,24 +1862,40 @@ function onClick(e) {
     return go({layout: 'chat', chat: el.dataset.chat, m: el.dataset.jump});
   }
   if ((el = hit('[data-open]'))) return go({layout: S.route.layout === 'map' ? 'chat' : S.route.layout, chat: el.dataset.open, m: el.dataset.at || null});
-  if ((el = hit('[data-person]'))) return go({person: el.dataset.person, layout: S.route.layout === 'map' ? 'chat' : S.route.layout});
+  if ((el = hit('[data-person]'))) return go({person: el.dataset.person, chat: null, layout: S.route.layout});
   if ((el = hit('[data-post]'))) return go({post: el.dataset.post}, true);
-  if ((el = hit('.results .msg'))) return go({layout: S.route.layout === 'board' ? 'board' : 'chat', chat: el.dataset.chat, m: el.dataset.seq, q: null, person: null});
+  if ((el = hit('.results .msg'))) {
+    if (S.route.layout === 'map') return go({chat: el.dataset.chat, person: null});
+    return go({layout: S.route.layout === 'board' ? 'board' : 'chat', chat: el.dataset.chat, m: el.dataset.seq, q: null, person: null});
+  }
+  if (HOVERLESS.matches && (el = hit('.msg')) && !hit('a, button, .actions')) {  // a tap shows the message's actions
+    const was = el.classList.contains('act');
+    for (const m of $$('.msg.act')) m.classList.remove('act');
+    el.classList.toggle('act', !was);
+    if (!was) $('.actions', el).scrollIntoView({block: 'nearest'});
+  }
 }
 
 function onKey(e) {
   const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || '');
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); return overlay.on ? overlay.close() : openSearch(); }
-  if (e.key === 'Escape') { if (overlay.on) return overlay.close(); if (S.route.thread || S.route.knew) return go({thread: null, knew: null}, true); }
+  if (e.key === 'Escape') { if (overlay.on) return overlay.close(); if (S.route.thread || S.route.knew) return back({thread: null, knew: null}, true); }
   if (e.key === 'Enter' && document.activeElement?.dataset.text) return openText(document.activeElement.dataset.text);
   if (typing || overlay.on || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === '/') { e.preventDefault(); return openSearch(); }
+  if (e.key === ' ' && replay.shown && !['BUTTON', 'A'].includes(document.activeElement?.tagName)) { e.preventDefault(); return replay.toggle(); }
+  if ((e.key === 'r' || e.key === 'R') && S.route.layout !== 'board') return replay.on ? replay.exit() : replay.enter();
+  if (replay.on && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    e.preventDefault();
+    return replay.seek(replay.t + (e.key === 'ArrowLeft' ? -1 : 1) * Math.max(10, replay.speed * 5));
+  }
   if (['1', '2', '3'].includes(e.key)) return go({layout: ['chat', 'board', 'map'][+e.key - 1], chat: S.route.chat, as: S.route.as});
   if (S.view && S.view.onKey) S.view.onKey(e);
 }
 
 function tips() {
   const tip = $('#tip');
+  document.addEventListener('touchstart', () => tip.classList.remove('on'), {passive: true});  // a tap's tip goes at the next touch
   document.addEventListener('mouseover', e => {
     const el = e.target.closest('[data-tip]');
     if (!el) return tip.classList.remove('on');
@@ -1714,12 +1907,338 @@ function tips() {
   });
 }
 
+// ---------------------------------------------------------------------- replay: the run again, from any moment
+
+// A replay puts the whole page back at one moment of the run: each chat as it stood then, and every view showing only
+// what had been written by then. Playing moves the moment on, and each message arrives in its chat, in the list and on
+// the map as the moment passes it. The messages come from a stream the server reads from memory, a few thousand ahead
+// of the moment, so a replay at any speed reads no log and costs the agents nothing. The live feed waits while a
+// replay runs, and the page takes a new snapshot when it ends.
+const SPEEDS = [10, 30, 60, 120, 600];
+const SPEED_KEY = 'swarmchat.view.speed';
+const FLIGHT = 1.2;  // seconds a message takes to cross the map, at any speed
+const AHEAD = 2000;  // messages fetched at a time
+
+const replay = {
+  on: false, t: 0, playing: false, dragging: false, busy: false,
+  speed: SPEEDS.includes(+localStorage.getItem(SPEED_KEY)) ? +localStorage.getItem(SPEED_KEY) : 60,
+  quiet: true,  // jump over stretches with no messages
+  act: null,  // messages over the whole run, in buckets, for the bar
+  gen: 0,  // moved on by each seek: an answer meant for an older moment is dropped
+  queue: [], qi: 0, cursor: 0, more: false, fetching: false, retry: 0,  // what is fetched and not yet reached
+  recent: [],  // what arrived in the last few seconds of play, for the map
+  seen: new Map(),  // chat -> its messages when it was last open, for the counts in the list
+  ended: null, wake: () => {},
+  drawn: {},
+
+  get shown() { return this.on || S.route.layout === 'map'; },
+  get end() { return this.act ? this.act.end : 0; },
+  trail() { return FLIGHT * this.speed; },  // seconds of the run a message is in flight on the map
+
+  init() {
+    const el = this.el = $('#bar');
+    this.canvas = $('canvas', el); this.ctx = this.canvas.getContext('2d');
+    this.head = $('.head', el); this.hov = $('.hov', el); this.track = $('.track', el); this.clock = $('.clock', el);
+    // the clock changes every frame while playing: its two lines are text nodes, changed in place
+    this.clock.innerHTML = '<b> </b><span> </span>';
+    [this.big, this.small] = [$('b', this.clock).firstChild, $('span', this.clock).firstChild];
+    this.clock.addEventListener('pointerenter', () => {
+      const a = this.act;
+      this.clock.title = !a || !a.start ? '' : this.on ? full(iso(Math.max(a.start, this.t))) : `From ${full(a.start)} to ${full(a.end)}`;
+    });
+    $('.speeds', el).innerHTML = SPEEDS.map(s => `<button data-speed="${s}" title="${s} seconds of the run each second">${s}×</button>`).join('');
+    el.addEventListener('click', e => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (b.dataset.play != null) this.toggle();
+      else if (b.dataset.speed) { this.speed = +b.dataset.speed; localStorage.setItem(SPEED_KEY, this.speed); this.draw(true); }
+      else if (b.dataset.quiet != null) { this.quiet = !this.quiet; this.draw(true); }
+      else if (b.dataset.live != null) this.exit();
+    });
+    const timeAt = e => {
+      const r = this.track.getBoundingClientRect(), a = this.act;
+      return a.start + Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * (a.end - a.start);
+    };
+    this.track.addEventListener('pointerdown', e => {
+      if (!this.act || !this.act.start) return;
+      this.track.setPointerCapture(e.pointerId);
+      this.dragging = true;
+      this.t = timeAt(e);
+      if (this.on) this.seekSoon(); else this.enter(this.t, false);
+      this.draw();
+    });
+    this.track.addEventListener('pointermove', e => {
+      if (!this.act || !this.act.start) return;
+      const t = timeAt(e), r = this.track.getBoundingClientRect();
+      if (this.dragging && this.on) { this.t = t; this.seekSoon(); this.draw(); }
+      const i = Math.min(this.act.counts.length - 1, Math.floor((t - this.act.start) / this.act.width));
+      this.hov.textContent = `${span(t - this.act.start)} · ${plural(this.act.counts[i] || 0, 'message')}`;
+      this.hov.style.left = Math.max(0, Math.min(r.width - this.hov.offsetWidth, e.clientX - r.left - this.hov.offsetWidth / 2)) + 'px';
+      this.hov.classList.add('on');
+    });
+    this.track.addEventListener('pointerup', e => {
+      if (!this.dragging) return;
+      this.dragging = false;
+      if (this.on) this.seek(timeAt(e));
+    });
+    this.track.addEventListener('pointerleave', () => this.hov.classList.remove('on'));
+    // only the strip is drawn again: a change to the buttons here would resize the bar while the browser is still
+    // telling of its last size
+    new ResizeObserver(([e]) => { this.tw = e.contentRect.width; this.th = e.contentRect.height; this.drawn.bucket = null; this.draw(); }).observe(this.track);
+    setInterval(() => { if (this.shown && !this.on) this.activity(); }, 30000);  // a live run grows
+  },
+
+  async activity() {
+    const w = this.track.getBoundingClientRect().width || 900;
+    const r = await api('view_activity', {buckets: Math.max(60, Math.min(600, Math.round(w / 5)))});
+    if (!this.act || r.end !== this.act.end || r.counts.length !== this.act.counts.length || !this.on) this.act = r;
+    this.draw(true);
+  },
+  bump(t) {  // a live message: one more in its bucket
+    const a = this.act;
+    if (!a || !a.start || this.on) return;
+    const i = Math.floor((t - a.start) / a.width);
+    if (i >= a.counts.length) return this.activitySoon();
+    if (i >= 0) a.counts[i]++;
+    this.drawSoon();
+  },
+  activitySoon: throttle(() => replay.activity(), 5000),
+  drawSoon: throttle(() => replay.draw(true), 250),
+
+  // ---- moving through the run
+  async enter(t, play = true) {
+    if (this.on) return;
+    if (S.route.layout === 'board') return;
+    if (!this.act || !this.act.start) await this.activity();
+    if (!this.act.start) return toast('There is nothing to replay yet: no one has written.');
+    this.on = true;
+    this.ended = new Promise(r => { this.wake = r; });
+    document.body.classList.add('replaying');
+    setLive('rp');
+    this.show();
+    requestAnimationFrame(n => this.tick(n));
+    await this.seek(t ?? this.act.start - 0.001);
+    if (play && this.on) this.play();
+  },
+  async exit(reroute = true) {
+    if (!this.on) return;
+    this.on = false; this.playing = false; this.dragging = false; this.gen++; this.queue = []; this.recent = [];
+    document.body.classList.remove('replaying');
+    this.draw(true);
+    await loadSnapshot();
+    S.as = null;
+    if (S.route.as) await loadAs();
+    setLive(S.server.read_only ? 'ro' : 'on');
+    this.wake();
+    S.viewKey = null; S.paneKey = null;
+    if (reroute) await route();
+    this.activity();
+  },
+  play() {
+    if (!this.on) return this.enter();
+    if (this.atEnd()) return this.seek(this.act.start - 0.001).then(() => { this.playing = true; this.draw(true); });
+    this.playing = true;
+    this.draw(true);
+  },
+  pause() { this.playing = false; this.draw(true); },
+  toggle() { if (this.playing) this.pause(); else this.play(); },
+  atEnd() { return !this.more && this.qi >= this.queue.length && this.t >= this.end; },
+  seekSoon: throttle(() => { if (replay.on) replay.seek(replay.t); }, 200),
+
+  // Puts the page at the moment t: every chat as it stood then, and the messages after it to come.
+  async seek(t) {
+    const a = this.act;
+    t = Math.max(a.start - 0.001, Math.min(a.end, t));
+    const gen = ++this.gen;
+    this.t = t; this.queue = []; this.qi = 0; this.more = true; this.fetching = true; this.busy = true;
+    let at, ahead;
+    try {
+      [at, ahead] = await Promise.all([api('view_at', {at: t, as: S.route.as || undefined}),
+        api('view_replay', {after: t - 2 * this.trail(), limit: AHEAD})]);  // from a little before, for what is in flight
+    } catch (e) {
+      if (gen === this.gen) { this.fetching = false; this.busy = false; toast(e.message); }
+      return;
+    }
+    if (gen !== this.gen || !this.on) return;
+    this.apply(at);
+    const list = ahead.messages;
+    let i = 0;
+    while (i < list.length && list[i][0] <= t) i++;
+    this.recent = list.slice(0, i); this.queue = list.slice(i);
+    this.cursor = list.length ? list[list.length - 1] : t; this.more = ahead.more;
+    this.fetching = false; this.busy = false;
+    this.seen = new Map([...S.chats.values()].map(c => [c.id, c.messages]));  // nothing is new at a new moment
+    if (S.view && S.view.onSeek) S.view.onSeek(); else S.viewKey = null;
+    if (S.pane && S.pane.onSeek) S.pane.onSeek(); else if (S.pane) S.paneKey = null;
+    if (S.viewKey === null || S.paneKey === null) await route(); else { side.build(); renderTop(); }
+    this.draw(true);
+  },
+  // The agent seen as, at the same moment: when it changes in a replay.
+  async reload() {
+    const gen = this.gen;
+    this.busy = true;
+    try {
+      const r = await api('view_at', {at: this.t, as: S.route.as || undefined});
+      if (gen === this.gen) this.apply(r);
+    } finally { if (gen === this.gen) this.busy = false; }
+  },
+  // Every chat as the server says it stood at the moment.
+  apply(r) {
+    S.total = 0; S.sent = new Map(); S.last = new Map();
+    for (const c of S.chats.values()) {
+      const x = r.chats[c.id] || {born: false, messages: 0, sent: {}, recent: 0};
+      c.born = x.born || x.messages > 0; c.messages = x.messages; c.sent = x.sent; c.recent = x.recent;
+      c.last = x.last ? {...x.last, text: '', deleted: false, files: 0} : null;
+      c.last_at = x.last_at || c.created_at;
+      S.total += x.messages;
+      for (const [u, n] of Object.entries(x.sent)) S.sent.set(u, (S.sent.get(u) || 0) + n);
+      if (x.last) { const t = ms(x.last.at) / 1000; if (!(S.last.get(x.last.from) >= t)) S.last.set(x.last.from, t); }
+    }
+    S.as = null;
+    if (S.route.as) this.applyAs(r.chats, null);
+  },
+  // What the agent seen as had read in each of its chats at that moment. Messages since the answer was asked for are
+  // counted on top.
+  applyAs(chats, since) {
+    const id = S.route.as, old = S.as;
+    const mine = [...S.chats.values()].filter(c => chats[c.id] && chats[c.id].as && c.born)
+      .sort((a, b) => (b.last_at > a.last_at) - (b.last_at < a.last_at));
+    const later = since == null ? [] : this.recent.filter(m => m[0] > since && m[3] !== id);
+    S.as = {user: id, replay: true, order: mine.map(c => c.id), positions: {}, unread: [], unreadLeft: 0, chats: new Map()};
+    for (const c of mine) {
+      const x = chats[c.id].as;
+      S.as.positions[c.id] = x.upto;
+      S.as.chats.set(c.id, {id: c.id, mentioned: x.mentioned, notify: old?.chats.get(c.id)?.notify || 'all',
+        unread: x.unread + later.filter(m => m[1] === c.id).length});
+    }
+  },
+  // Reads are not in the stream: while playing as an agent, its unread counts are asked for again every few seconds.
+  refreshAs: throttle(async () => {
+    const r = replay, gen = r.gen, t = r.t, id = S.route.as;
+    if (!r.on || !id) return;
+    const at = await api('view_at', {at: t, as: id, mine: true});
+    if (gen !== r.gen || !r.on || S.route.as !== id) return;
+    r.applyAs(at.chats, t);
+    buildSide();
+    if (S.view && S.view.onAs) S.view.onAs();
+  }, 2000),
+
+  // ---- playing
+  tick(now) {
+    if (!this.on) return;
+    requestAnimationFrame(n => this.tick(n));
+    const dt = this.last ? Math.min(1, (now - this.last) / 1000) : 0;  // more than a second: the tab was hidden
+    this.last = now;
+    if (this.playing && !this.dragging && !this.busy) {
+      const next = this.queue[this.qi];
+      let t = this.t + dt * this.speed;
+      // a stretch with nothing in it for more than two seconds of play: jump to just before its end
+      if (this.quiet && next && next[0] - t > this.speed * 2) t = next[0] - this.speed * 0.6;
+      else if (this.quiet && !next && !this.more) t = Math.max(t, this.end);
+      if (this.more) t = Math.min(t, Array.isArray(this.cursor) ? this.cursor[0] : this.cursor);  // never past what is fetched
+      this.t = Math.max(this.t, Math.min(t, Math.max(this.end, next ? next[0] : 0)));
+      const due = [];
+      while (this.qi < this.queue.length && this.queue[this.qi][0] <= this.t) due.push(this.queue[this.qi++]);
+      if (due.length) this.arrive(due);
+      if (this.atEnd()) this.pause();
+      if (this.more && !this.fetching && this.queue.length - this.qi < AHEAD / 2 && now > this.retry) this.fill();
+      if (S.route.as) this.refreshAs();
+    }
+    this.draw();
+  },
+  async fill() {
+    this.fetching = true;
+    const gen = this.gen;
+    try {
+      const r = await api('view_replay', {after: this.cursor, limit: AHEAD});
+      if (gen !== this.gen) return;
+      this.queue = this.queue.slice(this.qi).concat(r.messages); this.qi = 0;
+      if (r.messages.length) this.cursor = r.messages[r.messages.length - 1];
+      this.more = r.more;
+    } catch (e) {
+      this.retry = performance.now() + 2000;
+    } finally { if (gen === this.gen) this.fetching = false; }
+  },
+  // Messages the moment has just passed, as [time, chat, seq, sender]: counted, and handed to the views.
+  arrive(list) {
+    for (const m of list) {
+      const [t, chat, seq, from] = m, c = S.chats.get(chat);
+      if (!c) continue;
+      const at = iso(t);
+      c.messages++; c.born = true; c.recent = (c.recent || 0) + 1;
+      c.last = {seq, from, at, text: '', deleted: false, files: 0}; c.last_at = at;
+      c.sent[from] = (c.sent[from] || 0) + 1;
+      S.total++;
+      S.sent.set(from, (S.sent.get(from) || 0) + 1);
+      S.last.set(from, t);
+      const mine = S.as && S.as.chats.get(chat);
+      if (mine && from !== S.as.user) mine.unread++;
+    }
+    this.recent.push(...list);
+    const old = this.t - 2 * this.trail();
+    if (this.recent.length > 6000 || this.recent[0][0] < old) {
+      let i = 0;
+      while (i < this.recent.length && this.recent[i][0] < old) i++;
+      this.recent = this.recent.slice(Math.max(i, this.recent.length - 6000));
+    }
+    if (S.view && S.view.onReplay) S.view.onReplay(list);
+    if (S.pane && S.pane.onReplay) S.pane.onReplay(list);
+    buildSide();
+  },
+
+  // ---- the bar
+  show() {
+    if (this.shown && (!this.act || !this.act.start)) this.activity(); else this.draw(true);
+  },
+  draw(all) {
+    const a = this.act, el = this.el;
+    if (!el || !this.shown) return;
+    const t = this.on ? this.t : a ? a.end : 0;
+    const state = this.on ? (this.playing ? 'pause' : this.atEnd() ? 'again' : 'play') : 'replay';
+    if (all || state !== this.drawn.state) {
+      const play = $('[data-play]', el);
+      play.innerHTML = {pause: '❚❚ Pause', play: '▶ Play', again: '↻ Replay', replay: '▶ Replay'}[state];
+      play.title = this.on ? 'Play or pause (space)' : 'Play the run again from its start (R)';
+      for (const b of $$('[data-speed]', el)) b.classList.toggle('on', +b.dataset.speed === this.speed);
+      $('[data-quiet]', el).classList.toggle('on', this.quiet);
+      $('[data-quiet]', el).hidden = $('.speeds', el).hidden = $('[data-live]', el).hidden = !this.on;
+      this.drawn.state = state;
+    }
+    const length = a && a.start ? Math.max(0.001, a.end - a.start) : 0;
+    const big = !length ? 'No messages' : this.on ? span(t - a.start) : 'Live', small = !length ? '' : this.on ? `of ${span(length)}` : `${span(length)} so far`;
+    if (this.big.data !== big) this.big.data = big;
+    if (this.small.data !== small) this.small.data = small;
+    if (!length) return;
+    const frac = Math.max(0, Math.min(1, (t - a.start) / length));
+    this.head.style.transform = `translateX(${Math.round(frac * (this.tw || 0))}px)`;
+    this.head.hidden = !this.on;
+    const bucket = this.on ? Math.floor(frac * a.counts.length) : -1;
+    if (!all && bucket === this.drawn.bucket) return;
+    this.drawn.bucket = bucket;
+    const c = this.canvas, W = this.tw, H = this.th, dpr = devicePixelRatio || 1;
+    if (!W) return;
+    if (c.width !== Math.round(W * dpr) || c.height !== Math.round(H * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
+    const ctx = this.ctx, n = a.counts.length, bw = W / n, top = Math.max(...a.counts, 1);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const played = ink().played, future = ink().unplayed;
+    for (let i = 0; i < n; i++) {
+      if (!a.counts[i]) continue;
+      const h = Math.max(2, (H - 4) * Math.sqrt(a.counts[i] / top));
+      ctx.fillStyle = !this.on || i < bucket ? played : future;
+      ctx.fillRect(i * bw + 0.5, H - h, Math.max(1, bw - 1), h);
+    }
+  },
+};
+
 // ---------------------------------------------------------------------- the map: everyone at once
 
 // Categorical colours in a fixed order, made to be told apart on a light or a dark background. Past eight, the rest are "other".
 const PALETTE = ['#4269d0', '#efb118', '#ff725c', '#6cc5b0', '#3ca951', '#ff8ab7', '#a463f2', '#97bbf5'];
 const OTHER = '#7b8394';
-const MAP = {pos: new Map(), view: null, colorBy: null, lens: true};  // kept while the page is open
+const MAP = {pos: new Map(), view: null, colorBy: null, lens: !COARSE.matches, mode: null};  // kept while the page is open
+const RING = 300;  // the radius of the ring agents sit on, in the map's own units
+const RING_MOST = 60;  // more agents than this are laid out as a web
 
 // The layout runs in a worker, so the page never stops answering. Forces as in Fruchterman and Reingold: every pair
 // pushes apart, every link pulls together, and each step moves less than the one before.
@@ -1777,40 +2296,48 @@ function layoutWorker() {
   };
 }
 
+// The map shows every agent and every channel and group chat, and each message as a dot that flies from its sender to
+// its chat, in the sender's colour. Up to RING_MOST agents sit on a ring, in groups by the field the legend picks, with
+// each chat inside near its members and each direct chat a chord across. A larger swarm is laid out by forces ("web"),
+// so agents that talk sit together. The pane beside it shows the chat or agent picked, or every message as it comes.
 class MapView {
   constructor(main) {
-    this.main = main; this.pulses = []; this.win = null; this.winData = null; this.hover = null; this.selected = null;
-    main.innerHTML = html`<div class="mapwrap"><canvas class="graph"></canvas><div class="legend"></div>
-<div class="mapctl"><button class="btn" data-lens title="A lens that magnifies what is under the mouse (F)">Lens</button><button class="btn" data-fit title="Show everyone (0)">Fit</button></div>
-<div class="maphint">Scroll to zoom, drag to move. Click an agent to see as it, a chat to open it.</div>
-<div class="strip"><div class="sctl"><button class="btn" data-whole title="Count every message">Whole run</button><button class="btn" data-play title="Slide a window of time across the run">▶ Replay</button></div>
-<div class="chart"><canvas></canvas><div class="when"><span></span><span></span></div><div class="sel"></div></div></div></div>`.s;
+    this.main = main; this.pulses = []; this.lit = new Map(); this.hover = null; this.hoverEdge = null; this.selected = null;
+    main.innerHTML = html`<div class="mapwrap"><div class="stage"><canvas class="layer"></canvas><canvas class="layer"></canvas><canvas class="graph"></canvas></div><div class="legend"></div>
+<div class="mapctl"><div class="seg small"><button data-mode="ring" title="Agents on a ring, their chats inside">Ring</button><button data-mode="web" title="Agents that talk sit together">Web</button></div><button class="btn" data-lens title="A lens that magnifies what is under the mouse (F)">Lens</button><button class="btn" data-fit title="Show everyone (0)">Fit</button></div>
+<div class="mapcard" hidden></div></div>`.s;
+    // Three canvases, one over another: links at the bottom, then what moves, then chats, agents and names on top, which
+    // also takes the mouse. Only the middle one is drawn every frame.
+    [this.base, this.fly] = $$('canvas.layer', main);
     this.canvas = $('canvas.graph', main); this.ctx = this.canvas.getContext('2d');
-    this.strip = $('.strip canvas', main); this.sctx = this.strip.getContext('2d');
-    this.legend = $('.legend', main);
+    this.legend = $('.legend', main); this.card = $('.mapcard', main);
     S.mapPane = true;
-    $('#pane').classList.add('open');
     this.listen();
+    this.size();
     this.build(true);
-    this.loadActivity();
-    this.resize = new ResizeObserver(() => { this.size(); this.draw(); this.drawStrip(); });
-    this.resize.observe(this.canvas); this.resize.observe(this.strip);
-    $('[data-lens]', main).classList.toggle('on', MAP.lens);
-    this.showPane();
+    this.resize = new ResizeObserver(() => { this.size(); if (MAP.mode === 'ring') this.fit(); this.draw(); });
+    this.resize.observe(this.canvas);
+    this.onRoute();
   }
   destroy() {
     this.dead = true; this.resize.disconnect(); if (this.worker) this.worker.terminate();
-    cancelAnimationFrame(this.raf); this.raf = 0; S.mapPane = false; clearInterval(this.playing);
-    $('#pane').classList.remove('open'); $('#pane').replaceChildren();
+    cancelAnimationFrame(this.raf); this.raf = 0; S.mapPane = false;
+    if (this.side && this.side.destroy) this.side.destroy();
+    $('#pane').classList.remove('open', 'mappane'); $('#pane').replaceChildren();
   }
   size() {
-    const dpr = devicePixelRatio || 1;
-    for (const c of [this.canvas, this.strip]) {
-      const r = c.getBoundingClientRect();
-      c.width = Math.max(1, Math.round(r.width * dpr)); c.height = Math.max(1, Math.round(r.height * dpr));
-      c.w = r.width; c.h = r.height;
-    }
+    const dpr = Math.min(2, devicePixelRatio || 1), c = this.canvas, r = c.getBoundingClientRect();  // 3, as on many phones, would draw 2.25 times as many pixels for no gain anyone sees
+    for (const x of [this.base, this.fly, c]) { x.width = Math.max(1, Math.round(r.width * dpr)); x.height = Math.max(1, Math.round(r.height * dpr)); }
+    c.w = r.width; c.h = r.height;
     this.dpr = dpr;
+    this.layersKey = null;
+  }
+  controls() {
+    for (const b of $$('[data-mode]', this.main)) b.classList.toggle('on', b.dataset.mode === MAP.mode);
+    $('.stage', this.main).classList.toggle('web', MAP.mode === 'web');  // on a web, what moves is drawn over the names
+    const lens = $('[data-lens]', this.main);
+    lens.classList.toggle('on', MAP.lens);
+    lens.hidden = MAP.mode === 'ring';
   }
 
   // ---- the graph
@@ -1829,9 +2356,23 @@ class MapView {
         for (const u of c.members) { const i = index.get('u:' + u); if (i != null) edges.push({a: h, b: i, chat: c.id, user: u, kind: 'spoke'}); }
       }
     }
-    const spread = Math.sqrt(nodes.length) * 40;
     const nbrs = new Map();
     for (const e of edges) { (nbrs.get(e.a) || nbrs.set(e.a, []).get(e.a)).push(e.b); (nbrs.get(e.b) || nbrs.set(e.b, []).get(e.b)).push(e.a); }
+    this.nodes = nodes; this.index = index; this.edges = edges; this.nbrs = nbrs;
+    // New counts are shown four times a second, or once on a web of thousands of links, which takes long to paint
+    if ((edges.length > 2000) !== this.big) { this.big = edges.length > 2000; this.reweigh = throttle(() => { if (!this.dead) this.weigh(); }, this.big ? 1000 : 250); }
+    this.direct = new Map(edges.filter(e => e.kind === 'direct').map(e => [e.chat, e]));
+    MAP.mode ||= nodes.filter(n => n.kind === 'agent').length <= RING_MOST ? 'ring' : 'web';
+    this.controls();
+    this.weigh();
+    this.colors();
+    if (MAP.mode === 'ring') {
+      if (this.worker) { this.worker.terminate(); this.worker = null; }
+      this.ring();
+      this.fit();
+      return;
+    }
+    const spread = Math.sqrt(nodes.length) * 40;
     let placed = 0;
     nodes.forEach((n, i) => {
       const p = MAP.pos.get(n.key);
@@ -1840,9 +2381,6 @@ class MapView {
       const a = Math.random() * Math.PI * 2, r = near ? 20 + Math.random() * 30 : Math.sqrt(Math.random()) * spread;
       n.x = (near ? near.x : 0) + Math.cos(a) * r; n.y = (near ? near.y : 0) + Math.sin(a) * r;
     });
-    this.nodes = nodes; this.index = index; this.edges = edges; this.nbrs = nbrs;
-    this.weigh();
-    this.colors();
     this.layout(fresh && placed < nodes.length / 2);
     if (!MAP.view) this.fit(); else this.view = MAP.view;
   }
@@ -1864,8 +2402,10 @@ class MapView {
     this.edges.forEach((e, i) => { a[i] = e.a; b[i] = e.b; pull[i] = (e.kind === 'direct' ? 0.6 : 1) * (0.4 + 0.6 * Math.log1p(e.w0 || 0) / Math.log1p(most)) / Math.sqrt(Math.min(degree[e.a], degree[e.b])); });
     const k = 26;
     this.worker.onmessage = m => {
+      if (MAP.mode !== 'web') return;
       const {x: X, y: Y, done} = m.data;
       this.nodes.forEach((d, i) => { d.x = X[i]; d.y = Y[i]; MAP.pos.set(d.key, {x: d.x, y: d.y}); });
+      this.moved = (this.moved || 0) + 1;
       if (this.autoFit) this.fit();
       if (done) this.autoFit = false;
       this.kick();
@@ -1873,31 +2413,108 @@ class MapView {
     this.autoFit = fresh;
     this.worker.postMessage({x, y, mass, a, b, pull, k, iterations: fresh ? 320 : 90, heat: fresh ? Math.sqrt(n) * k / 3 : k * 1.5});
   }
+  // The ring: agents in order of their group, then of their ids, with a space between groups. Each chat sits toward
+  // its members: in the middle when they are all around the ring, near them when they sit together. Chats that land
+  // on each other are pushed apart.
+  ring() {
+    const agents = this.nodes.filter(n => n.kind === 'agent'), hubs = this.nodes.filter(n => n.kind === 'hub');
+    const by = MAP.colorBy && MAP.colorBy !== 'activity' ? MAP.colorBy : null;
+    const group = n => by ? String((user(n.user).fields || {})[by] ?? '') : '';
+    const size = new Map();
+    for (const n of agents) size.set(group(n), (size.get(group(n)) || 0) + 1);
+    agents.sort((a, b) => size.get(group(b)) - size.get(group(a)) || natural(group(a), group(b)) || natural(a.user, b.user));
+    const gaps = size.size > 1 && size.size < agents.length ? size.size : 0, slots = Math.max(1, agents.length + gaps);
+    this.arcs = [];
+    let slot = 0, prev = null;
+    for (const n of agents) {
+      const g = group(n);
+      if (gaps && prev !== null && g !== prev) slot++;
+      const a = -Math.PI / 2 + slot / slots * Math.PI * 2;
+      n.ang = a; n.x = RING * Math.cos(a); n.y = RING * Math.sin(a);
+      if (gaps && g !== prev) this.arcs.push({group: g, a0: a, a1: a, color: (this.groupColor && this.groupColor.get(g)) || OTHER});
+      else if (gaps) this.arcs[this.arcs.length - 1].a1 = a;
+      prev = g; slot++;
+    }
+    this.rr = Math.min(18, Math.PI * RING / slots * 0.62);  // an agent's radius: room on the ring for each
+    // chats: bigger with more members and more messages, all smaller when there are many
+    let area = 0;
+    for (const h of hubs) {
+      const c = S.chats.get(h.chat);
+      h.hr = 8 + 18 * Math.sqrt(c.members.length / Math.max(1, agents.length)) + Math.min(8, Math.sqrt(c.messages) * 0.5);
+      area += h.hr * h.hr;
+    }
+    const room = 0.3 * (RING * 0.75) ** 2, shrink = area > room ? Math.sqrt(room / area) : 1;
+    for (const h of hubs) {
+      h.hr = Math.max(5, h.hr * shrink);
+      let sx = 0, sy = 0, k = 0;
+      for (const u of S.chats.get(h.chat).members) {
+        const i = this.index.get('u:' + u);
+        if (i == null) continue;
+        sx += Math.cos(this.nodes[i].ang); sy += Math.sin(this.nodes[i].ang); k++;
+      }
+      h.x = k ? sx / k * RING * 0.62 : 0; h.y = k ? sy / k * RING * 0.62 : 0;
+    }
+    for (let it = 0; it < 120; it++) {
+      let moved = false;
+      for (let i = 0; i < hubs.length; i++) for (let j = i + 1; j < hubs.length; j++) {
+        const a = hubs[i], b = hubs[j], want = a.hr + b.hr + 6;
+        let dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy);
+        if (d >= want) continue;
+        if (d < 0.01) { dx = Math.cos(i * 7 + j); dy = Math.sin(i * 7 + j); d = 1; }
+        const push = (want - d) / 2;
+        a.x -= dx / d * push; a.y -= dy / d * push; b.x += dx / d * push; b.y += dy / d * push;
+        moved = true;
+      }
+      for (const h of hubs) {
+        const d = Math.hypot(h.x, h.y), most = RING - this.rr - h.hr - 10;
+        if (d > most) { h.x *= most / d; h.y *= most / d; }
+      }
+      if (!moved) break;
+    }
+    // names go outside the ring when they do not fit inside a circle, and run out from the centre when there are many
+    this.agents = agents.length;
+    this.outside = agents.some(n => name(n.user).length > 3);
+    this.ctx.font = `600 12.5px ${MAP.font ||= getComputedStyle(document.body).fontFamily}`;
+    this.labelRoom = this.outside ? Math.min(150, Math.max(...agents.map(n => this.ctx.measureText(name(n.user)).width)) + 24) : 0;
+  }
   fit() {
-    if (!this.nodes.length || !this.canvas.w) { this.view = MAP.view = {x: 0, y: 0, k: 1}; return; }
+    const W = this.canvas.w, H = this.canvas.h;
+    if (!this.nodes.length || !W) { this.view = {x: 0, y: 0, k: 1}; return; }
+    if (MAP.mode === 'ring') {
+      // As large as fits beside the legend: a circle needs to keep clear only of the legend's corner, so a few
+      // centres are tried, from the middle down, and the one that leaves the largest circle wins.
+      const l = this.legend, x0 = l.offsetLeft - 8, x1 = l.offsetLeft + l.offsetWidth + 8, y1 = l.offsetTop + l.offsetHeight + 8;
+      const names = this.agents > 12 ? this.labelRoom : this.outside ? 30 : 0;
+      let best = {r: 0, dy: 0};
+      for (let dy = 0; dy <= y1; dy += y1 / 6) {
+        const cx = W / 2, cy = H / 2 + dy, clear = Math.hypot(Math.max(x0 - cx, 0, cx - x1), Math.max(cy - y1, 0));
+        const r = Math.min(W / 2 - 12, H / 2 - dy - 12, clear);
+        if (r > best.r) best = {r, dy};
+      }
+      const k = Math.max(0.2, (best.r - names - 10) / (RING + this.rr));
+      this.view = {x: 0, y: -best.dy / k, k};
+      return this.kick();
+    }
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const n of this.nodes) { x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y); x1 = Math.max(x1, n.x); y1 = Math.max(y1, n.y); }
-    const k = Math.min(4, 0.86 * Math.min(this.canvas.w / Math.max(60, x1 - x0), this.canvas.h / Math.max(60, y1 - y0)));
+    const k = Math.min(4, 0.86 * Math.min(W / Math.max(60, x1 - x0), H / Math.max(60, y1 - y0)));
     this.view = MAP.view = {x: (x0 + x1) / 2, y: (y0 + y1) / 2, k};
     this.kick();
   }
+  // How much each link and agent carries, from the chats as they stand (at the moment, in a replay).
   weigh() {
-    const win = this.winData;
-    const msgs = id => win ? (win[id] ? win[id].messages : 0) : S.chats.get(id).messages;
-    const sent = (id, u) => win ? (win[id] ? win[id].sent[u] || 0 : 0) : S.chats.get(id).sent[u] || 0;
-    const total = new Map();
-    for (const e of this.edges) {
-      e.w = e.kind === 'direct' ? msgs(e.chat) : sent(e.chat, e.user);
-      if (e.w0 == null) e.w0 = e.w;
-    }
-    if (win) for (const [id, d] of Object.entries(win)) for (const [u, n] of Object.entries(d.sent)) total.set(u, (total.get(u) || 0) + n);
     let maxE = 1, maxA = 1, maxH = 1;
-    for (const n of this.nodes) {
-      if (n.kind === 'agent') { n.w = win ? total.get(n.user) || 0 : S.sent.get(n.user) || 0; n.r = 2.5 + 1.6 * Math.sqrt(Math.log2(1 + n.w)); maxA = Math.max(maxA, n.w); }
-      else { const c = S.chats.get(n.chat); n.w = msgs(n.chat); n.r = Math.min(16, 3 + Math.sqrt(c.members.length)); maxH = Math.max(maxH, n.w); }
+    for (const e of this.edges) {
+      const c = S.chats.get(e.chat);
+      e.w = !c ? 0 : e.kind === 'direct' ? c.messages : c.sent[e.user] || 0;
+      if (e.w0 == null) e.w0 = e.w;
+      maxE = Math.max(maxE, e.w);
     }
-    for (const e of this.edges) maxE = Math.max(maxE, e.w);
-    this.maxE = maxE; this.maxA = maxA; this.maxH = maxH;
+    for (const n of this.nodes) {
+      if (n.kind === 'agent') { n.w = S.sent.get(n.user) || 0; n.r = 2.5 + 1.6 * Math.sqrt(Math.log2(1 + n.w)); maxA = Math.max(maxA, n.w); }
+      else { const c = S.chats.get(n.chat); n.w = c.messages; n.r = Math.min(16, 3 + Math.sqrt(c.members.length)); maxH = Math.max(maxH, n.w); }
+    }
+    this.maxE = maxE; this.maxA = maxA; this.maxH = maxH; this.version = (this.version || 0) + 1;
     if (MAP.colorBy === 'activity' && this.nodes.some(n => n.color)) this.colors();
     this.kick();
   }
@@ -1910,31 +2527,40 @@ class MapView {
     return [...keys.entries()].filter(([, vals]) => vals.size >= 2 && vals.size <= 60)
       .sort((p, q) => [...q[1].values()].reduce((s, n) => s + n, 0) - [...p[1].values()].reduce((s, n) => s + n, 0)).map(([k, vals]) => ({key: k, vals}));
   }
+  // On a ring each agent wears its own colour, and the field picked in the legend groups the ring, with a band in the
+  // field's colour around each group. On a web the field colours the agents.
   colors() {
     const fields = this.fields();
-    if (!MAP.colorBy || (MAP.colorBy !== 'activity' && !fields.some(f => f.key === MAP.colorBy))) MAP.colorBy = fields.length ? fields[0].key : 'activity';
+    const ring = MAP.mode === 'ring', small = this.nodes.filter(n => n.kind === 'agent').length <= 16;
+    if (!MAP.colorBy || (MAP.colorBy !== 'activity' && !fields.some(f => f.key === MAP.colorBy))) MAP.colorBy = fields.length && !(ring && small) ? fields[0].key : 'activity';
     const by = MAP.colorBy;
     let items = [];
+    this.groupColor = new Map();
     if (by === 'activity') {
       for (const n of this.nodes) if (n.kind === 'agent') {
         const t = this.maxA > 1 ? Math.log1p(n.w || 0) / Math.log1p(this.maxA) : 0;
         n.color = ink().dark ? `hsl(220 ${40 + 50 * t}% ${30 + 45 * t}%)` : `hsl(220 ${35 + 50 * t}% ${82 - 40 * t}%)`;
       }
-      items = ink().dark ? [['quiet', 'hsl(220 40% 30%)'], ['busy', 'hsl(220 90% 75%)']] : [['quiet', 'hsl(220 35% 82%)'], ['busy', 'hsl(220 85% 42%)']];
+      if (!ring) items = ink().dark ? [['quiet', 'hsl(220 40% 30%)'], ['busy', 'hsl(220 90% 75%)']] : [['quiet', 'hsl(220 35% 82%)'], ['busy', 'hsl(220 85% 42%)']];
     } else {
       const vals = [...fields.find(f => f.key === by).vals.entries()].sort((p, q) => q[1] - p[1]);
-      const color = new Map(vals.slice(0, 8).map(([v], i) => [v, PALETTE[i]]));
-      for (const n of this.nodes) if (n.kind === 'agent') { const v = (user(n.user).fields || {})[by]; n.color = color.get(String(v)) || OTHER; }
-      items = vals.slice(0, 8).map(([v, cnt]) => [v, color.get(v), cnt]);
+      this.groupColor = new Map(vals.slice(0, 8).map(([v], i) => [v, PALETTE[i]]));
+      for (const n of this.nodes) if (n.kind === 'agent') { const v = (user(n.user).fields || {})[by]; n.color = this.groupColor.get(String(v)) || OTHER; }
+      items = vals.slice(0, 8).map(([v, cnt]) => [v, this.groupColor.get(v), cnt]);
       const rest = vals.slice(8).reduce((s, [, cnt]) => s + cnt, 0) + [...S.users.values()].filter(u => !(u.fields || {})[by]).length;
       if (rest) items.push(['other', OTHER, rest]);
     }
+    if (ring) for (const n of this.nodes) if (n.kind === 'agent') n.color = userColor(n.user);
+    this.version = (this.version || 0) + 1;
     for (const n of this.nodes) if (n.kind === 'hub') n.color = S.chats.get(n.chat).kind === 'channel' ? ink().channel : ink().group;
     const opts = [...fields.map(f => f.key), 'activity'];
-    this.legend.innerHTML = html`<div class="lh">Agents by <select data-colorby>${opts.map(o => html`<option value="${o}"${o === by ? new Safe(' selected') : ''}>${o}</option>`)}</select></div>
-${items.map(([label, c, cnt]) => html`<div class="li"><span class="dot" style="background:${c}"></span>${label}${cnt != null ? html`<span class="n">${num(cnt)}</span>` : ''}</div>`)}
-<div class="shapes"><span><span class="sq" style="background:var(--channel)"></span>channel</span><span><span class="sq" style="background:var(--group)"></span>group</span><span>— direct chat</span></div>`.s;
-    $('select', this.legend).onchange = e => { MAP.colorBy = e.target.value; this.colors(); this.kick(); };
+    this.legend.innerHTML = html`<span class="lh">${ring ? 'Grouped by' : 'Agents by'} <select data-colorby>${opts.map(o => html`<option value="${o}"${o === by ? new Safe(' selected') : ''}>${o === 'activity' && ring ? 'nothing' : o}</option>`)}</select></span>
+${items.map(([label, c, cnt]) => html`<span class="li" title="${label}${cnt != null ? ` · ${num(cnt)}` : ''}"><span class="${ring ? 'band' : 'dot'}" style="background:${c}"></span><span class="lbl">${label}${cnt != null ? html`<span class="n">${num(cnt)}</span>` : ''}</span></span>`)}
+<span class="shapes">${ring ? html`<span><span class="ring"></span>chat</span><span><span class="chord"></span>direct chat</span><span><span class="flying"></span>message</span>`
+    : html`<span><span class="sq" style="background:var(--channel)"></span>channel</span><span><span class="sq" style="background:var(--group)"></span>group</span><span>— direct chat</span>`}</span>
+<span class="hint">Click anything to see its messages. Scroll to zoom${ring ? '' : ', F for a lens'}.</span>`.s;
+    this.legend.classList.toggle('ring', ring);  // on a ring, one line until the mouse is over it: the ring needs the room
+    $('select', this.legend).onchange = e => { MAP.colorBy = e.target.value; this.colors(); if (MAP.mode === 'ring') { this.ring(); this.fit(); } this.kick(); };
   }
 
   // ---- drawing
@@ -1946,7 +2572,7 @@ ${items.map(([label, c, cnt]) => html`<div class="li"><span class="dot" style="b
   }
   project() {
     const W = this.canvas.w, H = this.canvas.h, v = this.view || {x: 0, y: 0, k: 1}, m = this.mouse;
-    const lens = MAP.lens && m && !this.dragging, R = Math.min(260, Math.max(140, Math.min(W, H) / 3.2)), dist = 3.2;
+    const lens = MAP.mode === 'web' && MAP.lens && m && !this.dragging, R = Math.min(260, Math.max(140, Math.min(W, H) / 3.2)), dist = 3.2;
     const k0 = Math.exp(dist) / (Math.exp(dist) - 1) * R, k1 = dist / R;
     for (const n of this.nodes) {
       let sx = (n.x - v.x) * v.k + W / 2, sy = (n.y - v.y) * v.k + H / 2, mag = 1;
@@ -1958,43 +2584,259 @@ ${items.map(([label, c, cnt]) => html`<div class="li"><span class="dot" style="b
       n.sx = sx; n.sy = sy; n.mag = mag;
     }
   }
+  // The messages in flight now: [from node, to node, how far along, colour]. In a replay they move with the moment, so
+  // they stop when it is paused. Live, each crosses in FLIGHT seconds.
+  flights() {
+    const out = [], now = performance.now();
+    const add = (chat, from, p) => {
+      const c = S.chats.get(chat), i = this.index.get('u:' + from);
+      if (!c || i == null) return;
+      const j = c.kind === 'direct' ? this.index.get('u:' + c.members.find(u => u !== from)) : this.index.get('c:' + chat);
+      if (j != null) out.push([i, j, p, this.nodes[i].color]);
+    };
+    if (replay.on) {
+      const t = replay.t, trail = replay.trail(), list = replay.recent;
+      for (let i = list.length - 1; i >= 0 && out.length < 3000; i--) {
+        const age = t - list[i][0];
+        if (age > trail) break;
+        if (age >= 0) add(list[i][1], list[i][3], age / trail);
+      }
+    } else {
+      this.pulses = this.pulses.filter(p => now < p.t0 + FLIGHT * 1000);
+      for (const p of this.pulses) add(p.chat, p.from, (now - p.t0) / (FLIGHT * 1000));
+    }
+    return out;
+  }
+  glow(u) {  // 1 just after an agent wrote, fading to 0
+    if (replay.on) { const t = S.last.get(u); return t == null ? 0 : Math.max(0, 1 - (replay.t - t) / (2 * replay.trail())); }
+    const t = this.lit.get(u);
+    return t == null ? 0 : Math.max(0, 1 - (performance.now() - t) / (2000 * FLIGHT));
+  }
   draw() {
     if (!this.canvas.w || !this.nodes) return;
-    const ctx = this.ctx, W = this.canvas.w, H = this.canvas.h, k = (this.view || {k: 1}).k;
-    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    ctx.clearRect(0, 0, W, H);
+    const W = this.canvas.w, H = this.canvas.h;
     this.project();
+    if (MAP.mode === 'ring') this.drawRing(W, H); else this.drawWeb(W, H);
+  }
+  // The ring in three coats. What changes only with the counts, the mouse or the view (links, chats, agents and names)
+  // is painted into two layers kept between frames, and each frame lays the glows and the messages in flight between
+  // them: a frame costs two copies and a few dots, however many links there are.
+  drawRing(W, H) {
+    const v = this.view, key = [W, H, v.x, v.y, v.k, this.hover, this.hoverEdge && this.hoverEdge.chat, this.selected, this.selChat,
+      this.version, S.route.as, S.route.person, S.route.chat].join();
+    if (key !== this.layersKey) { this.paintRing(W, H); this.layersKey = key; }
+    const ctx = this.layer(this.fly, W, H), k = v.k, ra = this.rr * k, rel = this.related(), focus = this.hover ?? this.selected;
+    const near = focus == null ? null : new Set([focus, ...(this.nbrs.get(focus) || [])]);
+    for (let i = 0; i < this.nodes.length; i++) {  // an agent glows just after it writes
+      const n = this.nodes[i];
+      if (n.kind !== 'agent') continue;
+      const g = this.glow(n.user);
+      if (g <= 0) continue;
+      const dim = (rel && !rel.agents.has(n.user)) || (near && !near.has(i));
+      ctx.fillStyle = n.color; ctx.globalAlpha = (dim ? 0.08 : 0.2) * g;
+      ctx.beginPath(); ctx.arc(n.sx, n.sy, ra * 1.65, 0, Math.PI * 2); ctx.fill();
+    }
+    const dot = Math.max(3, Math.min(5.5, 4.2 * Math.sqrt(k)));
+    for (const [i, j, p, color] of this.flights()) {  // messages in flight, under what they fly between
+      const a = this.nodes[i], b = this.nodes[j], e = p < 0.5 ? 2 * p * p : 1 - (-2 * p + 2) ** 2 / 2;
+      ctx.globalAlpha = 1 - p * 0.55;
+      ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(a.sx + (b.sx - a.sx) * e, a.sy + (b.sy - a.sy) * e, dot, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+  layer(c, W, H) {  // one of the canvases, cleared, drawn on in page pixels
+    const ctx = c.getContext('2d'), dpr = this.dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    return ctx;
+  }
+  paintRing(W, H) {
+    const k = this.view.k, rel = this.related(), focus = this.hover ?? this.selected, I = ink();
+    const sel = this.selChat, hot = this.hoverEdge ? this.hoverEdge.chat : null;
+    const lit = new Set();
+    if (focus != null) { lit.add(focus); for (const j of this.nbrs.get(focus) || []) lit.add(j); }
+    const live = id => !replay.on || S.chats.get(id)?.born;
+    const ra = this.rr * k;
+    let ctx = this.layer(this.base, W, H);
+    ctx.lineCap = 'round';
+    // spokes from each agent to its chats, then direct chats as chords, thicker with more messages
+    const spokes = [[], []];
+    for (const e of this.edges) {
+      if (e.kind !== 'spoke' || !live(e.chat)) continue;
+      const a = this.nodes[e.a], b = this.nodes[e.b];
+      spokes[focus != null && (e.a === focus || e.b === focus) ? 1 : 0].push(a.sx, a.sy, b.sx, b.sy);
+    }
+    spokes.forEach((pts, on) => {
+      ctx.strokeStyle = on ? I.text : `rgba(${I.spoke}, ${focus != null || rel ? 0.45 : 1})`;
+      ctx.globalAlpha = on ? 0.35 : 1;
+      ctx.lineWidth = on ? 1.4 : 1.1;
+      ctx.beginPath();
+      for (let i = 0; i < pts.length; i += 4) { ctx.moveTo(pts[i], pts[i + 1]); ctx.lineTo(pts[i + 2], pts[i + 3]); }
+      ctx.stroke();
+    });
+    ctx.globalAlpha = 1;
+    for (const e of this.edges) {
+      if (e.kind !== 'direct' || (!e.w && e.chat !== sel && e.chat !== hot)) continue;
+      const a = this.nodes[e.a], b = this.nodes[e.b];
+      const on = e.chat === sel || e.chat === hot || (focus != null && (e.a === focus || e.b === focus));
+      const dim = (rel && !rel.chats.has(e.chat)) || (focus != null && !on && !sel);
+      const t = Math.log1p(e.w) / Math.log1p(this.maxE);
+      ctx.strokeStyle = `rgba(${I.edgeDm}, ${on ? 0.7 : dim ? 0.06 : 0.12 + 0.2 * t})`;
+      ctx.lineWidth = (0.8 + 3.6 * t) * Math.min(1.4, Math.max(0.7, k));
+      ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
+    }
+    // groups of agents: a band in the group's colour just outside the ring
+    if (this.arcs.length > 1) {
+      const R = RING * k + ra + 6, cx = (0 - this.view.x) * k + W / 2, cy = (0 - this.view.y) * k + H / 2, half = Math.PI / Math.max(1, this.nodes.length) * 0.8;
+      ctx.lineWidth = 3;
+      for (const arc of this.arcs) {
+        ctx.strokeStyle = arc.color;
+        ctx.beginPath(); ctx.arc(cx, cy, R, arc.a0 - Math.min(half, ra / R), arc.a1 + Math.min(half, ra / R)); ctx.stroke();
+      }
+    }
+    ctx = this.layer(this.canvas, W, H);
+    // chats: a disc with the name inside when it fits
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const font = MAP.font ||= getComputedStyle(document.body).fontFamily;
+    for (let i = 0; i < this.nodes.length; i++) {
+      const n = this.nodes[i];
+      if (n.kind !== 'hub' || !live(n.chat)) continue;
+      const c = S.chats.get(n.chat), r = n.hr * k, picked = S.route.chat === n.chat;
+      const dim = (rel && !rel.chats.has(n.chat)) || (focus != null && !lit.has(i));
+      ctx.globalAlpha = dim ? 0.3 : 1;
+      ctx.fillStyle = I.panel; ctx.strokeStyle = picked ? I.text : I.line2; ctx.lineWidth = picked ? 2 : 1.5;
+      ctx.beginPath(); ctx.arc(n.sx, n.sy, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      const label = c.name ? '#' + c.name : title(c, null);
+      let size = Math.round(Math.max(9, Math.min(12.5, r * 0.42)) * 2) / 2;
+      const widths = MAP.widths ||= new Map();
+      ctx.font = `600 ${size}px ${font}`;
+      let w = widths.get(size + label);
+      if (w == null) widths.set(size + label, w = ctx.measureText(label).width);
+      if (w > r * 2 - 6 && size * (r * 2 - 6) / w >= 9) {  // a smaller size that fits, down to 9px
+        w = r * 2 - 6; size = Math.floor(size * w / widths.get(size + label) * 2) / 2;
+        ctx.font = `600 ${size}px ${font}`;
+      }
+      if (w <= r * 2 - 6) { ctx.fillStyle = I.text; ctx.fillText(label, n.sx, n.sy); }
+      else if (r >= 7 && c.kind === 'channel') { ctx.fillStyle = I.muted; ctx.font = `700 ${Math.min(13, r)}px ${font}`; ctx.fillText('#', n.sx, n.sy + 0.5); }
+    }
+    // agents: a disc in its colour, with its name or initials inside
+    for (let i = 0; i < this.nodes.length; i++) {
+      const n = this.nodes[i];
+      if (n.kind !== 'agent') continue;
+      const dim = (rel && !rel.agents.has(n.user)) || (focus != null && !lit.has(i));
+      ctx.globalAlpha = dim ? 0.25 : 1;
+      ctx.fillStyle = n.color;
+      ctx.beginPath(); ctx.arc(n.sx, n.sy, ra, 0, Math.PI * 2); ctx.fill();
+      if (S.route.person === n.user || S.route.as === n.user || i === this.hover) {
+        ctx.strokeStyle = I.text; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(n.sx, n.sy, ra + 3.5, 0, Math.PI * 2); ctx.stroke();
+      }
+      if (ra >= 8) {
+        const u = name(n.user), inside = u.length <= 3 ? u : initials(u);
+        ctx.font = `650 ${Math.min(12, ra * 0.68)}px ${font}`; ctx.fillStyle = '#fff';
+        ctx.fillText(inside, n.sx, n.sy + 0.5);
+      }
+    }
+    // names outside the ring, read from the centre out
+    if (this.outside) {
+      const radial = this.agents > 12, cx = -this.view.x * k + W / 2, cy = -this.view.y * k + H / 2;
+      const R = RING * k + ra + (this.arcs.length > 1 ? 14 : 9);
+      ctx.font = `600 ${radial ? Math.max(10, Math.min(12.5, ra * 0.85)) : 12.5}px ${font}`;
+      ctx.textBaseline = 'middle';
+      for (let i = 0; i < this.nodes.length; i++) {
+        const n = this.nodes[i];
+        if (n.kind !== 'agent') continue;
+        const on = lit.has(i) || S.route.as === n.user || S.route.person === n.user, c = Math.cos(n.ang), s = Math.sin(n.ang);
+        ctx.globalAlpha = (rel && !rel.agents.has(n.user)) || (focus != null && !lit.has(i)) ? 0.3 : 1;
+        ctx.fillStyle = on ? I.text : I.muted;
+        if (radial) {  // along the radius, turned so it never reads upside down
+          ctx.save();
+          ctx.translate(cx + c * R, cy + s * R);
+          ctx.rotate(c < 0 ? n.ang + Math.PI : n.ang);
+          ctx.textAlign = c < 0 ? 'right' : 'left';
+          ctx.fillText(name(n.user), 0, 0);
+          ctx.restore();
+        } else {
+          ctx.textAlign = Math.abs(c) < 0.25 ? 'center' : c > 0 ? 'left' : 'right';
+          ctx.fillText(name(n.user), cx + c * R, cy + s * R + (Math.abs(c) < 0.25 ? s * 8 : 0));
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+  // The web in the same three coats as the ring: links, then chats, agents and names, painted when the view, the
+  // layout or the counts change, and over them each frame the glows and the messages on their way.
+  drawWeb(W, H) {
+    const v = this.view, lens = MAP.lens && this.mouse && !this.dragging ? this.mouse : null;
+    const key = ['web', W, H, v.x, v.y, v.k, lens && lens.x, lens && lens.y, this.hover, this.selected, this.selChat, this.version,
+      this.moved, S.route.as].join();
+    if (key !== this.layersKey) { this.paintWeb(W, H); this.layersKey = key; }
+    const ctx = this.layer(this.fly, W, H), scale = Math.max(0.55, Math.min(2.2, Math.sqrt(v.k))), rel = this.related();
+    const focus = this.hover ?? this.selected, near = focus == null ? null : new Set([focus, ...(this.nbrs.get(focus) || [])]);
+    for (let i = 0; i < this.nodes.length; i++) {  // an agent glows just after it writes
+      const n = this.nodes[i];
+      if (n.kind !== 'agent') continue;
+      const g = this.glow(n.user);
+      if (g <= 0) continue;
+      const dim = (rel && !rel.agents.has(n.user)) || (replay.on && !n.w) || (near && !near.has(i));
+      ctx.fillStyle = n.color; ctx.globalAlpha = (dim ? 0.05 : 0.22) * g;
+      ctx.beginPath(); ctx.arc(n.sx, n.sy, this.radius(n, scale) * 2.2, 0, Math.PI * 2); ctx.fill();
+    }
+    const flying = this.flights(), halo = 0.25 * Math.max(0, Math.min(1, (600 - flying.length) / 400));
+    for (const [i, j, p, color] of flying) {  // messages on their way, each with a faint halo while there are few of them
+      const a = this.nodes[i], b = this.nodes[j], e = p < 0.5 ? 2 * p * p : 1 - (-2 * p + 2) ** 2 / 2;
+      const x = a.sx + (b.sx - a.sx) * e, y = a.sy + (b.sy - a.sy) * e;
+      ctx.fillStyle = color;
+      ctx.globalAlpha = Math.min(1, (1 - p) * 3);
+      ctx.beginPath(); ctx.arc(x, y, 2.6, 0, Math.PI * 2); ctx.fill();
+      if (!halo) continue;
+      ctx.globalAlpha *= halo;
+      ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+  paintWeb(W, H) {
+    const k = this.view.k;
+    let ctx = this.layer(this.base, W, H);
     const rel = this.related(), focus = this.hover ?? this.selected;
     const lit = new Set();
     if (focus != null) { lit.add(focus); for (const j of this.nbrs.get(focus) || []) lit.add(j); }
     // links, in a few strengths so each is one stroke
     const buckets = new Map();
     for (const e of this.edges) {
+      if (replay.on && !S.chats.get(e.chat)?.born) continue;
       const a = this.nodes[e.a], b = this.nodes[e.b];
-      const on = focus != null && (e.a === focus || e.b === focus);
+      const on = focus != null && (e.a === focus || e.b === focus) || e.chat === this.selChat;
       const dim = rel ? !rel.chats.has(e.chat) : false;
       const t = e.w ? Math.log1p(e.w) / Math.log1p(this.maxE) : 0;
-      const level = on ? 4 : dim ? 0 : t === 0 && this.winData ? 0 : 1 + Math.min(2, Math.floor(t * 3));
+      const level = on ? 4 : dim ? 0 : t === 0 && replay.on ? 0 : 1 + Math.min(2, Math.floor(t * 3));
       const key = (e.kind === 'direct' ? 'd' : 's') + level;
       (buckets.get(key) || buckets.set(key, []).get(key)).push(a.sx, a.sy, b.sx, b.sy);
     }
     const alpha = [0.035, 0.09, 0.2, 0.42, 0.85];
     ctx.lineCap = 'round';
     for (const [key, pts] of buckets) {
-      const level = +key[1];
+      // The faint links, nearly all of them, are one screen pixel wide. The browser draws a line that thin in a fast
+      // way of its own: thousands of 1px lines on a 2x screen took it hundreds of milliseconds each time the counts
+      // changed, and those at one pixel a few. Thin lines that cross add up where wider ones in one path did not, so
+      // their alpha is left as it was, and the busy middle looks much as before.
+      const level = +key[1], thin = level < 3;
       ctx.strokeStyle = key[0] === 'd' ? `rgba(${ink().edgeDm}, ${alpha[level]})` : `rgba(${ink().edge}, ${alpha[level] * 0.8})`;
-      ctx.lineWidth = level >= 3 ? 1.6 : 1;
+      ctx.lineWidth = thin ? 1 / this.dpr : 1.6;
       ctx.beginPath();
       for (let i = 0; i < pts.length; i += 4) { ctx.moveTo(pts[i], pts[i + 1]); ctx.lineTo(pts[i + 2], pts[i + 3]); }
       ctx.stroke();
     }
     // chats, then agents
+    ctx = this.layer(this.canvas, W, H);
     const scale = Math.max(0.55, Math.min(2.2, Math.sqrt(k)));
     for (const pass of ['hub', 'agent']) {
       for (let i = 0; i < this.nodes.length; i++) {
         const n = this.nodes[i];
         if (n.kind !== pass) continue;
-        const dim = (rel && (pass === 'hub' ? !rel.chats.has(n.chat) : !rel.agents.has(n.user))) || (this.winData && !n.w) || (focus != null && !lit.has(i));
+        if (pass === 'hub' && replay.on && !S.chats.get(n.chat)?.born) continue;
+        const dim = (rel && (pass === 'hub' ? !rel.chats.has(n.chat) : !rel.agents.has(n.user))) || (replay.on && !n.w) || (focus != null && !lit.has(i));
         const r = this.radius(n, scale);
         ctx.globalAlpha = dim ? 0.18 : 1;
         ctx.fillStyle = n.color;
@@ -2019,6 +2861,7 @@ ${items.map(([label, c, cnt]) => html`<div class="li"><span class="dot" style="b
     for (let i = 0; i < this.nodes.length; i++) {
       const n = this.nodes[i];
       if (n.sx < -50 || n.sy < -20 || n.sx > W + 50 || n.sy > H + 20) continue;
+      if (n.kind === 'hub' && replay.on && !S.chats.get(n.chat)?.born) continue;
       const me = S.route.as && n.user === S.route.as;
       if (!(n.mag > 1.3 || lit.has(i) || me || k > 1.2)) continue;
       wanted.push({i, rank: (i === focus ? 4e9 : 0) + (me ? 2e9 : 0) + (lit.has(i) ? 1e9 : 0) + n.mag * 1e6 + (n.w || 0)});
@@ -2048,27 +2891,9 @@ ${items.map(([label, c, cnt]) => html`<div class="li"><span class="dot" style="b
       ctx.strokeText(label, x, n.sy); ctx.fillStyle = n.kind === 'agent' ? ink().text : ink().chatName; ctx.fillText(label, x, n.sy);
     }
     ctx.globalAlpha = 1;
-    // messages on their way: sender to chat, then out to its members
-    const now = performance.now();
-    this.pulses = this.pulses.filter(p => now < p.t0 + p.dur);
-    for (const p of this.pulses) {
-      const t = (now - p.t0) / p.dur;
-      if (t < 0) continue;
-      const e = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
-      ctx.fillStyle = p.color;
-      for (const [i, j] of p.legs) {
-        const a = this.nodes[i], b = this.nodes[j];
-        if (!a || !b) continue;
-        const x = a.sx + (b.sx - a.sx) * e, y = a.sy + (b.sy - a.sy) * e;
-        ctx.globalAlpha = Math.min(1, (1 - t) * 3);
-        ctx.beginPath(); ctx.arc(x, y, 2.6, 0, Math.PI * 2); ctx.fill();
-        ctx.globalAlpha *= 0.25;
-        ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill();
-      }
-    }
-    ctx.globalAlpha = 1;
   }
   radius(n, scale) {  // the lens enlarges shapes less than it spreads them, so they never cover their neighbours
+    if (MAP.mode === 'ring') return (n.kind === 'hub' ? n.hr : this.rr) * this.view.k;
     return Math.min(n.kind === 'hub' ? 34 : 26, n.r * scale * (1 + (n.mag - 1) * 0.45));
   }
   kick(ms = 0) {
@@ -2078,234 +2903,220 @@ ${items.map(([label, c, cnt]) => html`<div class="li"><span class="dot" style="b
       this.raf = 0;
       if (this.dead) return;
       this.draw();
-      if (this.pulses.length || performance.now() < this.until) this.raf = requestAnimationFrame(loop);
+      const now = performance.now();
+      if (this.pulses.length || (replay.on && replay.playing) || now < this.until || (!replay.on && [...this.lit.values()].some(t => now - t < 2000 * FLIGHT))) this.raf = requestAnimationFrame(loop);
     };
     this.raf = requestAnimationFrame(loop);
   }
 
-  // ---- the mouse
+  // ---- the mouse and fingers
   listen() {
-    const c = this.canvas;
-    let down = null;
-    c.addEventListener('mousemove', e => {
-      const r = c.getBoundingClientRect();
-      this.mouse = {x: e.clientX - r.left, y: e.clientY - r.top};
+    const c = this.canvas, fingers = new Map();
+    const at = e => { const r = c.getBoundingClientRect(); return {x: e.clientX - r.left, y: e.clientY - r.top}; };
+    let down = null, pinch = null;
+    c.addEventListener('pointerdown', e => {
+      c.setPointerCapture(e.pointerId);
+      this.slop = e.pointerType === 'mouse' ? 0 : 12;  // a fingertip is less exact than a mouse
+      if (e.pointerType !== 'mouse') fingers.set(e.pointerId, at(e));
+      if (fingers.size === 2) {  // two fingers zoom about the point between them, and move the map as they move
+        const [p, q] = [...fingers.values()], v = this.view, mx = (p.x + q.x) / 2, my = (p.y + q.y) / 2;
+        pinch = {d: Math.max(10, Math.hypot(p.x - q.x, p.y - q.y)), k: v.k, wx: v.x + (mx - c.w / 2) / v.k, wy: v.y + (my - c.h / 2) / v.k};
+        down = null; this.dragging = true; this.mouse = null; this.card.hidden = true;
+        return;
+      }
+      down = {x: e.clientX, y: e.clientY, vx: this.view.x, vy: this.view.y}; this.dragging = false;
+      this.mouse = at(e);
+    });
+    c.addEventListener('pointermove', e => {
+      if (fingers.has(e.pointerId)) fingers.set(e.pointerId, at(e));
+      if (pinch) {
+        if (fingers.size < 2) return;
+        const [p, q] = [...fingers.values()], v = this.view, mx = (p.x + q.x) / 2, my = (p.y + q.y) / 2;
+        v.k = Math.max(0.03, Math.min(12, pinch.k * Math.hypot(p.x - q.x, p.y - q.y) / pinch.d));
+        v.x = pinch.wx - (mx - c.w / 2) / v.k; v.y = pinch.wy - (my - c.h / 2) / v.k;
+        return this.kick();
+      }
+      this.mouse = at(e);
       if (down) {
         const dx = e.clientX - down.x, dy = e.clientY - down.y;
-        if (Math.abs(dx) + Math.abs(dy) > 3) { this.dragging = true; c.classList.add('drag'); }
+        if (Math.abs(dx) + Math.abs(dy) > (e.pointerType === 'mouse' ? 3 : 8)) { this.dragging = true; c.classList.add('drag'); this.card.hidden = true; }
         if (this.dragging) { this.view.x = down.vx - dx / this.view.k; this.view.y = down.vy - dy / this.view.k; }
-      } else {
-        const hit = this.hit(this.mouse.x, this.mouse.y);
-        if (hit !== this.hover) { this.hover = hit; c.classList.toggle('point', hit != null); this.showPane(); }
+      } else if (e.pointerType === 'mouse') {
+        const hit = this.hit(this.mouse.x, this.mouse.y), edge = hit == null ? this.hitEdge(this.mouse.x, this.mouse.y) : null;
+        if (hit !== this.hover || edge !== this.hoverEdge) { this.hover = hit; this.hoverEdge = edge; c.classList.toggle('point', hit != null || !!edge); }
+        this.showCard();
       }
       this.kick();
     });
-    c.addEventListener('mouseleave', () => { this.mouse = null; if (this.hover != null) { this.hover = null; this.showPane(); } this.kick(); });
-    c.addEventListener('mousedown', e => { down = {x: e.clientX, y: e.clientY, vx: this.view.x, vy: this.view.y}; this.dragging = false; });
-    addEventListener('mouseup', this.up = () => {
-      if (!down) return;
-      const clicked = !this.dragging;
+    const up = (e, cancel) => {
+      fingers.delete(e.pointerId);
+      if (pinch) {  // the last finger up ends a pinch, and taps nothing
+        if (!fingers.size) { pinch = null; this.dragging = false; }
+        return this.kick();
+      }
+      const clicked = down && !this.dragging && !cancel;
       down = null; this.dragging = false; c.classList.remove('drag');
-      if (clicked && this.mouse) this.click(this.hit(this.mouse.x, this.mouse.y));
+      if (clicked && this.mouse) this.click(this.hit(this.mouse.x, this.mouse.y), this.hitEdge(this.mouse.x, this.mouse.y));
+      if (e.pointerType !== 'mouse') { this.mouse = null; this.hover = null; this.hoverEdge = null; }  // nothing stays under a lifted finger
       this.kick();
+    };
+    c.addEventListener('pointerup', e => up(e, false));
+    c.addEventListener('pointercancel', e => up(e, true));
+    c.addEventListener('pointerleave', e => {
+      if (e.pointerType !== 'mouse' || down) return;
+      this.mouse = null; this.hover = null; this.hoverEdge = null; this.card.hidden = true; this.kick();
     });
     c.addEventListener('wheel', e => {
       e.preventDefault();
       const r = c.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top, v = this.view;
       const k = Math.max(0.03, Math.min(12, v.k * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015))));
       v.x += (mx - c.w / 2) * (1 / v.k - 1 / k); v.y += (my - c.h / 2) * (1 / v.k - 1 / k); v.k = k;
+      this.card.hidden = true;
       this.kick();
     }, {passive: false});
-    this.main.addEventListener('click', e => {
-      if (e.target.closest('[data-lens]')) { MAP.lens = !MAP.lens; e.target.closest('[data-lens]').classList.toggle('on', MAP.lens); this.kick(); }
+    $('.mapwrap', this.main).addEventListener('click', e => {  // on the map's own element: #main outlives this view
+      if (e.target.closest('[data-lens]')) { MAP.lens = !MAP.lens; this.controls(); this.kick(); }
       if (e.target.closest('[data-fit]')) this.fit();
-      if (e.target.closest('[data-whole]')) this.setWindow(null);
-      if (e.target.closest('[data-play]')) this.play();
+      const mode = e.target.closest('[data-mode]');
+      if (mode && mode.dataset.mode !== MAP.mode) { MAP.mode = mode.dataset.mode; this.build(true); this.kick(); }
     });
-    this.stripEvents();
   }
   hit(x, y) {
     let best = null, bd = Infinity;
     const scale = Math.max(0.55, Math.min(2.2, Math.sqrt(this.view.k)));
     for (let i = 0; i < this.nodes.length; i++) {
-      const n = this.nodes[i], d = Math.hypot(n.sx - x, n.sy - y), r = this.radius(n, scale) + 5;
+      const n = this.nodes[i];
+      if (n.kind === 'hub' && replay.on && !S.chats.get(n.chat)?.born) continue;
+      const d = Math.hypot(n.sx - x, n.sy - y), r = this.radius(n, scale) + (MAP.mode === 'ring' ? 3 : 5) + (this.slop || 0);
       if (d < r && d < bd) { bd = d; best = i; }
     }
     return best;
   }
-  click(i) {
-    if (i == null) { this.selected = null; this.showPane(); return; }
+  hitEdge(x, y) {  // a direct chat's chord under the mouse
+    let best = null, bd = 5 + (this.slop || 0);
+    for (const e of this.direct.values()) {
+      if (!e.w && MAP.mode === 'ring') continue;
+      const a = this.nodes[e.a], b = this.nodes[e.b], dx = b.sx - a.sx, dy = b.sy - a.sy, l = dx * dx + dy * dy;
+      const t = l ? Math.max(0, Math.min(1, ((x - a.sx) * dx + (y - a.sy) * dy) / l)) : 0;
+      const d = Math.hypot(a.sx + t * dx - x, a.sy + t * dy - y);
+      if (d < bd) { bd = d; best = e; }
+    }
+    return best;
+  }
+  click(i, edge) {
+    if (i == null && !edge) return go({chat: null, person: null});
+    if (i == null) return go({chat: edge.chat, person: null});
     const n = this.nodes[i];
-    this.selected = i;
-    if (n.kind === 'agent') go({as: n.user === S.route.as ? null : n.user}, true);
-    else go({layout: 'chat', chat: n.chat});
-    this.showPane();
+    if (n.kind === 'agent') go({person: n.user === S.route.person ? null : n.user, chat: null});
+    else go({chat: n.chat === S.route.chat ? null : n.chat, person: null});
+  }
+  showCard() {
+    const n = this.hover != null ? this.nodes[this.hover] : null, e = this.hoverEdge, m = this.mouse;
+    if ((!n && !e) || !m) { this.card.hidden = true; return; }
+    const so = replay.on ? ' so far' : '';
+    if (n && n.kind === 'agent') {
+      const u = user(n.user), chats = (this.nbrs.get(this.hover) || []).length + [...this.direct.values()].filter(d => d.a === this.hover || d.b === this.hover).length;
+      this.card.innerHTML = html`<div class="ch">${avatar(n.user, 'sm')}<b>${u.name}</b>${u.name !== u.id ? html`<span>${u.id}</span>` : ''}</div>
+${Object.keys(u.fields || {}).length ? html`<div class="cf">${Object.entries(u.fields).map(([k, v]) => html`<span class="field"><i>${k}</i> ${v}</span> `)}</div>` : ''}
+<div class="cs">${plural(n.w, 'message')}${so} · in ${plural(chats, 'chat')}</div>`.s;
+    } else {
+      const c = S.chats.get(n ? n.chat : e.chat);
+      this.card.innerHTML = html`<div class="ch"><span class="ico ${c.kind}">${KIND[c.kind]}</span><b>${title(c, null)}</b></div>
+<div class="cs">${c.kind === 'direct' ? 'direct chat' : plural(c.members.length, 'member')} · ${plural(c.messages, 'message')}${so}</div>${c.description ? html`<div class="cf">${c.description}</div>` : ''}`.s;
+    }
+    this.card.hidden = false;
+    const w = this.card.offsetWidth, h = this.card.offsetHeight;
+    this.card.style.left = Math.min(this.canvas.w - w - 8, m.x + 16) + 'px';
+    this.card.style.top = Math.min(this.canvas.h - h - 8, m.y + 16) + 'px';
   }
   onKey(e) {
-    if (e.key === 'f' || e.key === 'F') { MAP.lens = !MAP.lens; $('[data-lens]', this.main).classList.toggle('on', MAP.lens); this.kick(); }
+    if ((e.key === 'f' || e.key === 'F') && MAP.mode === 'web') { MAP.lens = !MAP.lens; this.controls(); this.kick(); }
     if (e.key === '0') this.fit();
   }
-  onAs() { this.kick(); this.showPane(); }
-  onTheme() { this.colors(); this.kick(); this.drawStrip(); }
+  onTheme() { this.colors(); this.kick(); }
 
-  // ---- live
+  // ---- the pane: the chat picked on the map or in the list, an agent's messages, or every message as it comes
+  onRoute() {
+    const r = S.route, key = r.chat ? 'c:' + r.chat : r.person ? 'u:' + r.person : '';
+    this.selected = key ? this.index.get(key) ?? null : null;
+    this.selChat = r.chat && S.chats.get(r.chat)?.kind === 'direct' ? r.chat : null;
+    if (key + PHONE.matches !== this.sideKey) {
+      this.sideKey = key + PHONE.matches;
+      if (this.side && this.side.destroy) this.side.destroy();
+      const pane = $('#pane');
+      pane.classList.add('open', 'mappane');
+      pane.replaceChildren();
+      // On a phone the pane is a sheet under the map, for what is picked: every message as it comes has no room there.
+      this.side = r.chat && S.chats.has(r.chat) ? new ChatView(pane, r.chat, {inPane: true})
+        : r.person ? new AgentPane(pane, r.person) : PHONE.matches ? null : new ActivityView(pane, {inPane: true});
+      if (key) pane.insertAdjacentHTML('afterbegin', '<button class="sheetx" data-unpick title="Close" aria-label="Close">×</button>');
+    }
+    this.kick();
+  }
+  onAs() { this.version++; this.kick(); if (this.side && this.side.onAs) this.side.onAs(); }
+
+  // ---- live, and in a replay
   onEvents(ev) {
     let grew = false;
+    const now = performance.now();
     for (const m of ev.lines) {
       if (m.kind !== 'message') { grew = true; continue; }
-      const c = S.chats.get(m.chat), from = this.index.get('u:' + m.from);
-      if (!c || from == null) { grew = true; continue; }
-      const color = this.nodes[from].color || ink().text, now = performance.now();
-      if (c.kind === 'direct') {
-        const to = this.index.get('u:' + c.members.find(u => u !== m.from));
-        if (to != null) this.pulses.push({legs: [[from, to]], t0: now, dur: 900, color});
-      } else {
-        const hub = this.index.get('c:' + c.id);
-        if (hub == null) { grew = true; continue; }
-        this.pulses.push({legs: [[from, hub]], t0: now, dur: 450, color});
-        const out = c.members.filter(u => u !== m.from).slice(0, 30).map(u => this.index.get('u:' + u)).filter(i => i != null);
-        if (out.length) this.pulses.push({legs: out.map(o => [hub, o]), t0: now + 450, dur: 650, color});
-      }
-      this.bump(ms(m.at) / 1000);
+      if (!S.chats.has(m.chat) || this.index.get('u:' + m.from) == null) { grew = true; continue; }
+      if (S.chats.get(m.chat).kind !== 'direct' && !this.index.has('c:' + m.chat)) { grew = true; continue; }
+      this.pulses.push({chat: m.chat, from: m.from, t0: now});
+      this.lit.set(m.from, now);
     }
     if (this.pulses.length > 1500) this.pulses = this.pulses.slice(-1500);
+    if (this.side && this.side.onEvents) this.side.onEvents(ev);
     if (grew) this.regrow();
-    if (!this.winData) this.reweigh();
+    this.reweigh();
+    this.kick();
+  }
+  onReplay(list) {
+    if (this.side && this.side.onReplay) this.side.onReplay(list);
+    this.reweigh();
+    this.kick();
+  }
+  onSeek() {
+    this.weigh();
+    if (this.side && this.side.onSeek) this.side.onSeek();
+    else { this.sideKey = null; this.onRoute(); }
     this.kick();
   }
   regrow = throttle(() => { if (!this.dead) this.build(false); }, 3000);
-  reweigh = throttle(() => { if (!this.dead) { this.weigh(); if (this.selected == null && this.hover == null) this.showPane(); } }, 1000);
+}
 
-  // ---- the pane: what is under the mouse, or the busiest when nothing is
-  showPane() {
-    const pane = $('#pane');
-    pane.classList.add('open');
-    const i = this.hover ?? this.selected;
-    const n = i != null ? this.nodes[i] : null;
-    const win = this.win ? ` from ${clock(this.win[0])} to ${clock(this.win[1])}` : '';
-    if (!n) {
-      const agents = this.nodes.filter(d => d.kind === 'agent').sort((p, q) => q.w - p.w).slice(0, 12);
-      const chats = [...S.chats.values()].map(c => ({c, w: this.winData ? (this.winData[c.id]?.messages || 0) : c.messages})).sort((p, q) => q.w - p.w).slice(0, 12);
-      pane.innerHTML = html`<div class="phead"><h2>Busiest${win}</h2></div><div class="scroll"><div class="note">Hover over anything for more. Click an agent to see everything as it sees it.</div>
-<h3 class="ph3">Agents</h3>${agents.map(d => html`<div class="prow" data-person="${d.user}">${avatar(d.user, 'sm')}<span class="t">${name(d.user)}</span><span class="stamp">${num(d.w)}</span></div>`)}
-<h3 class="ph3">Chats</h3>${chats.map(({c, w}) => html`<div class="prow" data-open="${c.id}"><span class="ico ${c.kind}">${KIND[c.kind]}</span><span class="t">${title(c, null)}</span><span class="stamp">${num(w)}</span></div>`)}</div>`.s;
-      return;
-    }
-    if (n.kind === 'agent') {
-      const u = user(n.user);
-      const chats = this.edges.filter(e => e.a === i || e.b === i).map(e => ({c: S.chats.get(e.chat), w: e.w})).filter(x => x.c).sort((p, q) => q.w - p.w);
-      pane.innerHTML = html`<div class="phead">${avatar(n.user, 'sm')}<h2>${u.name}</h2></div><div class="scroll"><div class="note">${u.id}${u.status ? html` · <i>${u.status}</i>` : ''}<br>${Object.entries(u.fields || {}).map(([k, v]) => html`<span class="field"><i>${k}</i> ${v}</span> `)}</div>
-<div class="note"><b>${num(n.w)}</b> messages${win || ' in all'} · in ${plural(chats.length, 'chat')}</div>
-<div class="note"><button class="btn primary" data-see-as="${n.user}">See as ${first(n.user)}</button> <button class="btn" data-person="${n.user}">Profile</button></div>
-<h3 class="ph3">Where ${first(n.user)} writes</h3>${chats.slice(0, 30).map(({c, w}) => html`<div class="prow" data-open="${c.id}"><span class="ico ${c.kind}">${KIND[c.kind]}</span><span class="t">${title(c, n.user)}</span><span class="stamp">${num(w)}</span></div>`)}</div>`.s;
-    } else {
-      const c = S.chats.get(n.chat);
-      const people = c.members.map(u => ({u, w: this.winData ? (this.winData[c.id]?.sent[u] || 0) : c.sent[u] || 0})).sort((p, q) => q.w - p.w);
-      pane.innerHTML = html`<div class="phead"><span class="ico ${c.kind}">${KIND[c.kind]}</span><h2>${title(c, null)}</h2></div><div class="scroll">
-<div class="note">${c.kind}${c.public ? ', public' : ''} · ${plural(c.members.length, 'member')} · <b>${num(n.w)}</b> messages${win}</div>
-${c.last ? html`<div class="note"><b>${name(c.last.from)}</b> ${ago(c.last.at)}: ${c.last.deleted ? 'deleted message' : c.last.text || (c.last.files ? plural(c.last.files, 'file') : '')}</div>` : ''}
-<div class="note"><button class="btn primary" data-open="${c.id}">Open the chat</button> <button class="btn" data-board="${c.id}">As a board</button></div>
-<h3 class="ph3">Who writes here</h3>${people.slice(0, 40).map(({u, w}) => html`<div class="prow" data-person="${u}">${avatar(u, 'sm')}<span class="t">${name(u)}</span><span class="stamp">${num(w)}</span></div>`)}</div>`.s;
-    }
+// An agent picked on the map: who it is, and its latest messages.
+class AgentPane {
+  constructor(main, id) {
+    this.main = main; this.id = id;
+    const u = user(id);
+    const chats = [...S.chats.values()].filter(c => c.members.includes(id) && (!replay.on || c.born)).length;
+    main.innerHTML = html`<div class="mhead">${avatar(id)}<div class="who"><h1>${u.name}</h1><span class="sub">${[u.name !== id ? id : '', ...Object.values(u.fields || {})].filter(Boolean).join(' · ')}</span></div><div class="grow"></div><button class="btn" data-see-as="${id}" title="See everything as ${u.name} sees it">See as ${first(id)}</button></div>
+<div class="scroll"><div class="note"><b>${num(S.sent.get(id) || 0)}</b> messages${replay.on ? ' so far' : ''} · in ${plural(chats, 'chat')}${u.status ? html` · <i>${u.status}</i>` : ''}</div><div class="msgs results"><div class="loading">Loading</div></div></div>`.s;
+    this.scroll = $('.scroll', main);
+    this.load();
   }
-
-  // ---- the strip of messages over time
-  async loadActivity() {
-    const buckets = Math.max(60, Math.min(600, Math.round((this.strip.getBoundingClientRect().width || 900) / 4)));
-    const r = await api('view_activity', {buckets, as: S.route.as || undefined});
-    if (this.dead) return;
-    this.act = r;
-    const when = $$('.when span', this.main);
-    when[0].textContent = r.start ? full(r.start) : '';
-    when[1].textContent = r.end ? full(r.end) : '';
-    this.drawStrip();
+  async load() {  // one at a time, as in the activity list
+    if (this.loading) { this.again = true; return; }
+    this.loading = true; this.again = false;
+    const gen = replay.gen;
+    let r;
+    try { r = await api('view_search', {from: [this.id], limit: 50, before: replay.on ? isoAfter(replay.t) : undefined}); }
+    finally { this.loading = false; }
+    if (this.again) this.loadSoon();
+    if (this.dead || gen !== replay.gen) return;
+    let prev = null, out = '';
+    for (const m of r.messages.reverse()) { out += messageHtml(m, prev, {showChat: true}).s; prev = m; }
+    $('.msgs', this.main).innerHTML = out || html`<div class="note">No messages${replay.on ? ' yet at this moment' : ' yet'}.</div>`.s;
+    $('.note b', this.main).textContent = num(S.sent.get(this.id) || 0);
+    this.scroll.scrollTop = this.scroll.scrollHeight;
   }
-  bump(t) {
-    const a = this.act;
-    if (!a || !a.start) return;
-    const i = Math.floor((t - a.start) / a.width);
-    if (i >= a.counts.length) { this.reloadActivity(); return; }
-    if (i >= 0) a.counts[i]++;
-    this.drawStripSoon();
-  }
-  reloadActivity = throttle(() => { if (!this.dead) this.loadActivity(); }, 10000);
-  drawStripSoon = throttle(() => this.drawStrip(), 250);
-  drawStrip() {
-    const a = this.act, ctx = this.sctx, W = this.strip.w, H = this.strip.h;
-    if (!W || !ctx) return;
-    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    ctx.clearRect(0, 0, W, H);
-    if (!a || !a.counts.length) { ctx.fillStyle = ink().faint; ctx.font = '12px sans-serif'; ctx.fillText('No messages yet.', 8, H / 2); return; }
-    const top = Math.max(...a.counts, 1), bw = W / a.counts.length, h = H - 16;
-    for (let i = 0; i < a.counts.length; i++) {
-      const t0 = a.start + i * a.width;
-      const inWin = !this.win || (t0 + a.width >= this.win[0] && t0 <= this.win[1]);
-      ctx.fillStyle = inWin ? ink().accent : ink().line2;
-      const bh = a.counts[i] ? Math.max(1.5, h * a.counts[i] / top) : 0;
-      ctx.fillRect(i * bw + 0.5, h - bh, Math.max(1, bw - 1), bh);
-    }
-    if (this.win) {
-      const x0 = (this.win[0] - a.start) / (a.end - a.start) * W, x1 = (this.win[1] - a.start) / (a.end - a.start) * W;
-      ctx.strokeStyle = ink().accentSoft; ctx.lineWidth = 1;
-      ctx.strokeRect(x0 + 0.5, 0.5, Math.max(2, x1 - x0) - 1, h);
-      const sel = $('.sel', this.main);
-      sel.style.left = Math.min(W - 160, Math.max(0, x0)) + 'px';
-      sel.textContent = `${clockS(this.win[0])} to ${clockS(this.win[1])}`;
-    } else $('.sel', this.main).textContent = '';
-  }
-  stripEvents() {
-    const c = this.strip;
-    let start = null;
-    const timeAt = x => { const a = this.act; return a.start + Math.max(0, Math.min(1, x / c.w)) * (a.end - a.start); };
-    c.addEventListener('mousedown', e => { if (!this.act || !this.act.start) return; this.stop(); start = timeAt(e.offsetX); });
-    c.addEventListener('mousemove', e => {
-      if (start == null) return;
-      const t = timeAt(e.offsetX);
-      this.win = [Math.min(start, t), Math.max(start, t)];
-      this.drawStrip();
-    });
-    addEventListener('mouseup', this.stripUp = e => {
-      if (start == null) return;
-      const t = this.win ? this.win : null;
-      start = null;
-      if (!t || t[1] - t[0] < (this.act.end - this.act.start) / 300) this.setWindow(null); else this.setWindow(t);
-    });
-  }
-  setWindow(w) {
-    this.win = w;
-    this.drawStrip();
-    if (!w) { this.winData = null; this.stop(); this.weigh(); this.showPane(); return; }
-    this.fetchWindow();
-  }
-  fetchWindow = throttle(async () => {
-    if (!this.win) return;
-    const [from, to] = this.win;
-    const r = await api('view_activity', {buckets: 1, from, to, as: S.route.as || undefined});
-    if (this.dead || !this.win) return;
-    this.winData = r.window;
-    this.weigh();
-    if (this.selected == null && this.hover == null) this.showPane();
-  }, 120);
-  play() {
-    const a = this.act;
-    if (!a || !a.start) return;
-    if (this.playing) return this.stop();
-    const span = a.end - a.start, width = this.win ? this.win[1] - this.win[0] : span / 12;
-    let t = this.win && this.win[1] < a.end ? this.win[0] : a.start;
-    $('[data-play]', this.main).textContent = '❚❚ Pause';
-    this.playing = setInterval(() => {
-      t += span / 200;
-      if (t + width > a.end) { this.win = [a.end - width, a.end]; this.fetchWindow(); this.drawStrip(); return this.stop(); }
-      this.win = [t, t + width];
-      this.drawStrip();
-      this.fetchWindow();
-    }, 100);
-  }
-  stop() {
-    clearInterval(this.playing); this.playing = null;
-    const b = $('[data-play]', this.main);
-    if (b) b.textContent = '▶ Replay';
-  }
+  onEvents(ev) { if (ev.lines.some(m => m.from === this.id)) this.loadSoon(); }
+  onReplay(list) { if (list.some(m => m[3] === this.id)) this.loadSoon(); }
+  loadSoon = throttle(() => { if (!this.dead) this.load(); }, 500);
+  onSeek() { this.load(); }
+  destroy() { this.dead = true; }
 }
 
 // ---------------------------------------------------------------------- theme
@@ -2334,7 +3145,9 @@ function showTheme() {
   const b = $('#theme');
   b.innerHTML = THEMES[t].icon;
   b.title = THEMES[t].title;
+  $('meta[name="theme-color"]').content = getComputedStyle($('#top')).backgroundColor;  // a phone's browser bar matches
   if (S.view && S.view.onTheme) S.view.onTheme();
+  replay.draw(true);
 }
 systemDark.addEventListener('change', () => { if (theme() === 'system') showTheme(); });
 
@@ -2345,11 +3158,61 @@ function ink() {
   const read = name => { probe.style.color = `var(${name})`; return getComputedStyle(probe).color; };
   const bare = name => read(name).match(/[\d.]+/g).slice(0, 3).join(', ');
   const t = theme();
-  INK = {dark: t === 'dark' || (t === 'system' && systemDark.matches), text: read('--text'), faint: read('--faint'), line2: read('--line2'),
-    accent: read('--accent'), accentSoft: read('--accent-soft'), channel: read('--channel'), group: read('--group'),
-    chatName: read('--channel-soft'), bg: bare('--bg'), edge: bare('--edge'), edgeDm: bare('--edge-dm')};
+  INK = {dark: t === 'dark' || (t === 'system' && systemDark.matches), text: read('--text'), muted: read('--muted'), faint: read('--faint'),
+    line2: read('--line2'), panel: read('--panel'), accent: read('--accent'), accentSoft: read('--accent-soft'), channel: read('--channel'),
+    group: read('--group'), chatName: read('--channel-soft'), played: read('--played'), unplayed: read('--unplayed'),
+    bg: bare('--bg'), edge: bare('--edge'), edgeDm: bare('--edge-dm'), spoke: bare('--spoke')};
   probe.remove();
   return INK;
+}
+
+// ---------------------------------------------------------------------- widths
+
+// The sidebar and the pane beside the chat are as wide as their handles are dragged, and stay so in this browser. A
+// double click on a handle puts its default back, and the arrow keys move a handle that has the focus. The chat in
+// between keeps at least 400px.
+const WIDTHS_KEY = 'swarmchat.view.widths';
+const WIDE = {side: [180, 480], pane: [300, 760]};
+function grips() {
+  const app = $('#app'), saved = JSON.parse(localStorage.getItem(WIDTHS_KEY) || '{}');
+  const width = which => $(which === 'side' ? '#side' : '#pane').getBoundingClientRect().width;
+  const set = (which, w) => {
+    const other = which === 'side' ? width('pane') : width('side'), [lo, hi] = WIDE[which];
+    w = Math.round(Math.max(lo, Math.min(hi, innerWidth - other - 400, w)));
+    app.style.setProperty(`--${which}-w`, w + 'px');
+    return w;
+  };
+  const keep = (which, w) => {
+    if (w == null) delete saved[which]; else saved[which] = w;
+    localStorage.setItem(WIDTHS_KEY, JSON.stringify(saved));
+  };
+  for (const which in WIDE) if (saved[which]) app.style.setProperty(`--${which}-w`, saved[which] + 'px');
+  app.addEventListener('pointerdown', e => {
+    const g = e.target.closest('.grip');
+    if (!g || e.button !== 0) return;
+    e.preventDefault();
+    const which = g.dataset.grip, x0 = e.clientX, w0 = width(which), sign = which === 'side' ? 1 : -1;
+    let w = w0;
+    g.setPointerCapture(e.pointerId);
+    document.body.classList.add('resizing'); g.classList.add('on');
+    g.onpointermove = m => { w = set(which, w0 + sign * (m.clientX - x0)); };
+    g.onpointerup = g.onpointercancel = () => {
+      g.onpointermove = g.onpointerup = g.onpointercancel = null;
+      document.body.classList.remove('resizing'); g.classList.remove('on');
+      if (w !== w0) keep(which, w);
+    };
+  });
+  app.addEventListener('dblclick', e => {
+    const g = e.target.closest('.grip');
+    if (g) { app.style.removeProperty(`--${g.dataset.grip}-w`); keep(g.dataset.grip, null); }
+  });
+  app.addEventListener('keydown', e => {
+    const g = e.target.closest('.grip');
+    if (!g || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
+    e.preventDefault(); e.stopPropagation();  // not a step in a replay
+    const which = g.dataset.grip, sign = which === 'side' ? 1 : -1;
+    keep(which, set(which, width(which) + sign * (e.key === 'ArrowRight' ? 16 : -16)));
+  });
 }
 
 // ---------------------------------------------------------------------- start
@@ -2380,17 +3243,23 @@ async function start() {
   setLive(S.server.read_only ? 'ro' : 'on');
   S.since = Date.now();
   side.init();
+  replay.init();
   tips();
-  document.addEventListener('click', onClick);
+  // On the app and the overlay rather than the document: Safari on a phone turns a tap into a click only where something
+  // below the document listens for clicks.
+  for (const el of [$('#app'), $('#overlay')]) el.addEventListener('click', onClick);
   new MutationObserver(watchPictures).observe(document.body, {childList: true, subtree: true});
   document.addEventListener('keydown', onKey);
   addEventListener('hashchange', route);
+  PHONE.addEventListener('change', () => route());
+  COARSE.addEventListener('change', () => side.build());
   await route();
   follow();
 }
 
 (async function boot() {
   showTheme();
+  grips();  // before anything is drawn, so a saved width shows at once
   const found = location.hash.match(/(^#|&)token=([0-9a-f]{16,})/);
   if (found) {
     localStorage.setItem('swarmchat.view.token', found[2]);

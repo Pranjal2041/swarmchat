@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f9f9fb">
 <meta name="referrer" content="no-referrer">
 <title>swarmchat view</title>
 <link rel="icon" href="data:,">
@@ -11,16 +12,17 @@
 <body class="layout-chat">
 <div id="app">
   <header id="top">
-    <a class="brand" href="#" data-home>swarmchat<span>view</span></a>
+    <a class="brand" href="#" data-home><i class="logo"></i>swarmchat<span>view</span></a>
     <div id="stats"></div>
     <nav class="seg" id="layouts">
       <button data-layout="chat" title="Chats, like Slack (1)">Chat</button>
       <button data-layout="board" title="Posts and comments, like Reddit (2)">Board</button>
       <button data-layout="map" title="Everyone at once (3)">Map</button>
     </nav>
+    <button id="replay" class="replaybtn" title="Play the run again from its start (R)" aria-label="Replay">▶<span> Replay</span></button>
     <div class="grow"></div>
     <button id="as" class="as" title="See everything as one agent sees it"></button>
-    <button id="find" class="find" title="Search people, chats and messages">Search<kbd>⌘K</kbd></button>
+    <button id="find" class="find" title="Search people, chats and messages"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span>Search</span><kbd>⌘K</kbd></button>
     <button id="theme" class="theme"></button>
     <span id="live" class="live" title=""></span>
   </header>
@@ -31,15 +33,33 @@
     </div>
     <input id="filter" placeholder="Filter" autocomplete="off" spellcheck="false">
     <div id="list" class="vlist"><div class="vspace"></div><div class="vrows"></div></div>
+    <div class="grip" data-grip="side" aria-label="Sidebar width" role="separator" aria-orientation="vertical" tabindex="0" title="Drag to change the width. Double-click for the default."></div>
   </aside>
+  <button id="back" class="back" title="Back" aria-label="Back"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
   <main id="main"></main>
   <section id="pane"></section>
+  <div class="grip" data-grip="pane" aria-label="Pane width" role="separator" aria-orientation="vertical" tabindex="0" title="Drag to change the width. Double-click for the default."></div>
+  <footer id="bar">
+    <button class="play" data-play>▶ Replay</button>
+    <div class="track"><canvas></canvas><div class="head" hidden></div><div class="hov"></div></div>
+    <div class="clock"></div>
+    <div class="seg small speeds" hidden></div>
+    <button class="btn" data-quiet title="Jump over stretches with no messages" hidden>Skip gaps</button>
+    <button class="btn" data-live title="Leave the replay and follow the run as it happens (R)" hidden>Live</button>
+  </footer>
+  <nav id="tabbar">
+    <button data-nav="chats"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg><span>Chats</span></button>
+    <button data-nav="people"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><path d="M15.5 4.8a3.5 3.5 0 0 1 0 6.4M18 14.8c2 .8 3.2 2.5 3.5 5.2"/></svg><span>People</span></button>
+    <button data-nav="board"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6" rx="1.5"/><rect x="4" y="14" width="16" height="6" rx="1.5"/></svg><span>Board</span></button>
+    <button data-nav="map"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="4" r="1.6"/><circle cx="19" cy="15" r="1.6"/><circle cx="5" cy="15" r="1.6"/><circle cx="12" cy="12" r="2.4"/></svg><span>Map</span></button>
+    <button data-nav="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span>Search</span></button>
+  </nav>
 </div>
 <div id="overlay"></div>
 <div id="tip"></div>
 <div id="login">
   <form>
-    <div class="brand big">swarmchat<span>view</span></div>
+    <div class="brand big"><i class="logo"></i>swarmchat<span>view</span></div>
     <p>This page needs the view token. <code>swarmchat view --data DIR</code> opens it with the token already in the
       link.</p>
     <input name="token" placeholder="View token" autocomplete="off" spellcheck="false">
