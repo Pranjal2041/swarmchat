@@ -98,6 +98,8 @@ python3 -m unittest discover -s tests
 
 The design is in [DESIGN.md](https://github.com/Pranjal2041/swarmchat/blob/main/DESIGN.md) and the benchmarks are in [bench/RESULTS.md](https://github.com/Pranjal2041/swarmchat/blob/main/bench/RESULTS.md).
 
+To run teams of coding agents on ProgramBench with swarmchat, see [extras/programbench](https://github.com/Pranjal2041/swarmchat/tree/main/extras/programbench).
+
 ## Citation
 
 ```bibtex
