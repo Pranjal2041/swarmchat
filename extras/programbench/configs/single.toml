@@ -1,0 +1,21 @@
+# One agent on its own, set up like the official mini-swe-agent baseline. Its submission is its /workspace.
+name = "single"
+tasks = ["sitkevij__hex.61ae69b"]       # ProgramBench task ids. README.md lists the ten in the blog post.
+hours = 6                              # agent time per task
+snapshot_minutes = 30                  # save the submission this often, to score it over time. 0 for never.
+parallel = 1                           # tasks run at once
+loop = true                            # each time an agent ends its turn early, send it back to work
+
+[agent]
+# The agent's command-line tool, a Linux x86_64 build. It is mounted read-only into each container.
+kind = "claude"                        # claude, codex or command
+binary = "~/.local/bin/claude"
+model = "claude-opus-5-5"
+effort = "xhigh"
+# For Codex instead:
+# kind = "codex"
+# binary = "~/agents/codex"
+# model = "gpt-6-luna"
+# effort = "xhigh"
+
+# A config with no [team] section runs one agent.
