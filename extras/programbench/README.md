@@ -5,9 +5,6 @@ documentation, and asks it to rebuild the program from scratch. This folder runs
 team that talks over swarmchat. You describe the run in a config file: the tasks, the time, the agent and its model,
 the team's size, its roles and channels, and the prompts each role gets.
 
-It is a simpler version of the setup behind the blog post. It uses the same prompts and container limits, but it
-does not reproduce those runs exactly. It is not part of the swarmchat pip package.
-
 ## Quick start
 
 On a Linux x86_64 machine with Docker and Python 3.11 or later. The ProgramBench images are built for x86_64 only.
@@ -40,10 +37,10 @@ same config again skips the tasks that already finished.
 
 ### With Codex
 
-From the [Codex releases](https://github.com/openai/codex/releases), download
-`codex-x86_64-unknown-linux-musl.tar.gz` and `codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz`. We tested
-release 0.159.2. Unpack both into `~/agents/` and rename them `codex` and `codex-code-mode-host`. Codex runs its tools
-through the second one. Then use the Codex lines of the config's `[agent]` section, and `export OPENAI_API_KEY=...`.
+From [Codex 0.159.2](https://github.com/openai/codex/releases/tag/rust-v0.159.2), download
+`codex-x86_64-unknown-linux-musl.tar.gz` and `codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz`. Unpack both into
+`~/agents/` and rename them `codex` and `codex-code-mode-host`. Codex runs its tools through the second one. Then use
+the Codex lines of the config's `[agent]` section, and `export OPENAI_API_KEY=...`.
 
 ## What a run writes
 
@@ -175,5 +172,3 @@ tasks = ["drew-alleman__datasurgeon.d257cee", "sitkevij__hex.61ae69b", "blacknon
     "/usr/lib/x86_64-linux-gnu/pkgconfig/sqlite3.pc",
     "/usr/lib/python3.10/lib-dynload/_sqlite3.cpython-310-x86_64-linux-gnu.so"]
 ```
-
-`run.py` was tested with Claude Code 2.1.303 and Codex 0.159.2. A newer Codex may change its app server's protocol.

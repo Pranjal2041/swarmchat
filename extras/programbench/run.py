@@ -482,8 +482,7 @@ inherit = "all"
 [analytics]
 enabled = false
 
-# The features the blog post's runs turned off. Codex 0.159 still lists its subagent tools with these off, and
-# tells the model not to use them unless the prompt asks.
+# As in the blog post's runs.
 [features]
 multi_agent = false
 multi_agent_v2 = false
